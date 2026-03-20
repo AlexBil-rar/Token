@@ -38,9 +38,9 @@ class Node:
 
     def load_snapshot(self) -> bool:
         loaded = self.storage.load(self.dag, self.state)
-        if loaded:
+        if loaded is not None:
             print(f"Snapshot loaded: {len(self.dag.vertices)} transactions")
-        return loaded
+        return loaded is not None
 
     def save_snapshot(self) -> None:
         self.storage.save(self.dag, self.state)

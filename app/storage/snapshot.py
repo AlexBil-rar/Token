@@ -53,7 +53,7 @@ class SnapshotStorage:
         state.nonces.update(saved_state.get("nonces", {}))
         state.applied_txs.update(saved_state.get("applied_txs", []))
 
-        return data.get("wallet") or None
+        return data 
 
     def exists(self) -> bool:
         return self.path.exists()
