@@ -1,0 +1,50 @@
+{
+  "vertices": {
+    "73f8e5c5535060c5df207c01cd4fc80ac5c21a509856ed2a706b24030d0efdd3": {
+      "tx_id": "73f8e5c5535060c5df207c01cd4fc80ac5c21a509856ed2a706b24030d0efdd3",
+      "sender": "577ed30c610952faf3c6f29a53b8da33d4a53078",
+      "receiver": "fabbd12c9092b9bea10b0c07b9eb3f27c89cfec1",
+      "amount": 10,
+      "nonce": 1,
+      "timestamp": 1774045152,
+      "public_key": "d49005ef7b4380cfaad571d6c96aab1a1ca36f9bf9105b2835855e6f4c1050e9",
+      "parents": [],
+      "signature": "b0a8113594a1f259364fcac4232dde2900b60ee44dbd955afa2d94e089f1110e778848219121ccbc2ecaa35fe32ff2ec946bd0ab2046e1087f64a7e83bff5503",
+      "anti_spam_nonce": 17038,
+      "anti_spam_hash": "0006f4e5e0ba19193f9bfd30a111883a6a847dc7fd041daeb0b4e81ce3088d10",
+      "status": "pending",
+      "weight": 2
+    },
+    "ee4302357d6732594d13b332fabfa2e22ebac048a8365f2b71dc71b2a1f2e8e2": {
+      "tx_id": "ee4302357d6732594d13b332fabfa2e22ebac048a8365f2b71dc71b2a1f2e8e2",
+      "sender": "577ed30c610952faf3c6f29a53b8da33d4a53078",
+      "receiver": "fabbd12c9092b9bea10b0c07b9eb3f27c89cfec1",
+      "amount": 10,
+      "nonce": 2,
+      "timestamp": 1774045152,
+      "public_key": "d49005ef7b4380cfaad571d6c96aab1a1ca36f9bf9105b2835855e6f4c1050e9",
+      "parents": [
+        "73f8e5c5535060c5df207c01cd4fc80ac5c21a509856ed2a706b24030d0efdd3"
+      ],
+      "signature": "e31f07b6ab8f061cd266ee254f32f4031bbb0b5414cdc4b2e080be9492ef085e98807eeea62b563f4285444281d5bf2b012481c264a5d43c82dbc19e53508807",
+      "anti_spam_nonce": 1497,
+      "anti_spam_hash": "0007a71078be7a0a1962b389e8b1f175b8b83fa3733d6796c82bc4c5a76a3499",
+      "status": "pending",
+      "weight": 1
+    }
+  },
+  "state": {
+    "balances": {
+      "577ed30c610952faf3c6f29a53b8da33d4a53078": 9999980,
+      "fabbd12c9092b9bea10b0c07b9eb3f27c89cfec1": 20
+    },
+    "nonces": {
+      "577ed30c610952faf3c6f29a53b8da33d4a53078": 2,
+      "fabbd12c9092b9bea10b0c07b9eb3f27c89cfec1": 0
+    },
+    "applied_txs": [
+      "ee4302357d6732594d13b332fabfa2e22ebac048a8365f2b71dc71b2a1f2e8e2",
+      "73f8e5c5535060c5df207c01cd4fc80ac5c21a509856ed2a706b24030d0efdd3"
+    ]
+  }
+}

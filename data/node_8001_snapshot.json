@@ -1,0 +1,33 @@
+{
+  "vertices": {
+    "f8a05dc8da02fabd04a9955f53a1cac19289037d9b506769742f88a179c0cf8b": {
+      "tx_id": "f8a05dc8da02fabd04a9955f53a1cac19289037d9b506769742f88a179c0cf8b",
+      "sender": "a37419e0744df437cf792f2fcd42346449abba53",
+      "receiver": "ca32d4d8ea40508bbc5b972dc9d8f7d53b73e6aa",
+      "amount": 100,
+      "nonce": 1,
+      "timestamp": 1774045640,
+      "public_key": "ffeebdc3ca58e7c07ba6eed6038bd0093b10f38727c700f7237d5f97d34f02ca",
+      "parents": [],
+      "signature": "3c2b71a34752ba6f058c5f71e63e5f74c23f6c5b4b6f42edfce7e2d6df765bcca9c5db84f4519b51bc92b6b98793566acf2a0124efac244a6d02beb0d0c9d10b",
+      "anti_spam_nonce": 519,
+      "anti_spam_hash": "0006e92c36f6b34e9d8db45e214baaed50ad00f953fd17bbeaa7c0130c8019ec",
+      "status": "pending",
+      "weight": 1
+    }
+  },
+  "state": {
+    "balances": {
+      "a37419e0744df437cf792f2fcd42346449abba53": 9999900,
+      "ca32d4d8ea40508bbc5b972dc9d8f7d53b73e6aa": 100
+    },
+    "nonces": {
+      "a37419e0744df437cf792f2fcd42346449abba53": 1,
+      "ca32d4d8ea40508bbc5b972dc9d8f7d53b73e6aa": 0
+    },
+    "applied_txs": [
+      "f8a05dc8da02fabd04a9955f53a1cac19289037d9b506769742f88a179c0cf8b"
+    ]
+  },
+  "wallet": {}
+}

@@ -1,7 +1,10 @@
+# app/ledger/node.py
+
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from app.consensus.conflict_resolver import ConflictResolver
 from app.config import ANTI_SPAM_DIFFICULTY
@@ -13,7 +16,7 @@ from app.ledger.state import LedgerState
 from app.ledger.transaction import TransactionVertex
 from app.ledger.validator import ValidationResult, Validator
 from app.consensus.tip_selector import TipSelector
-
+from app.storage.snapshot import SnapshotStorage
 
 
 @dataclass
@@ -24,24 +27,23 @@ class Node:
     validator: Validator = field(default_factory=Validator)
     mempool: Mempool = field(default_factory=Mempool)
     consensus: ConsensusEngine = field(default_factory=ConsensusEngine)
-    tip_selector: TipSelector = field(default_factory=TipSelector)  # добавить
+    tip_selector: TipSelector = field(default_factory=TipSelector)
+    storage: SnapshotStorage = field(default_factory=SnapshotStorage)
 
     def select_parents(self) -> list[str]:
-        return self.tip_selector.select(self.dag)  # заменить весь метод
+        return self.tip_selector.select(self.dag)
 
     def bootstrap_genesis(self, address: str, balance: int) -> None:
         self.state.credit(address, balance)
 
-    def select_parents(self) -> list[str]:
-        tips = self.dag.get_tips()
+    def load_snapshot(self) -> bool:
+        loaded = self.storage.load(self.dag, self.state)
+        if loaded:
+            print(f"Snapshot loaded: {len(self.dag.vertices)} transactions")
+        return loaded
 
-        if not tips:
-            return []
-
-        if len(tips) == 1:
-            return [tips[0]]
-
-        return tips[:2]
+    def save_snapshot(self) -> None:
+        self.storage.save(self.dag, self.state)
 
     def mine_anti_spam(self, tx: TransactionVertex) -> None:
         nonce = 0
@@ -90,6 +92,7 @@ class Node:
         )
 
         if any(item.tx_id == tx.tx_id for item in accepted):
+            self.save_snapshot()
             return ValidationResult(True, "accepted", "transaction accepted")
 
         return ValidationResult(False, "not_committed", "transaction did not pass consensus")
