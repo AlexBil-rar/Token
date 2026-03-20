@@ -37,7 +37,6 @@ def main():
         print(f"Genesis wallet address:     {wallet.address}")
         print(f"Genesis wallet private_key: {wallet.private_key}")
 
-        # при загрузке snapshot — показываем сохранённый кошелёк
         wallet_data = node.storage.load(node.dag, node.state)
         if wallet_data:
             print(f"Resumed from snapshot — {len(node.dag.vertices)} transactions in DAG")
