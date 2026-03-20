@@ -12,7 +12,6 @@ from app.ledger.transaction import (
  
  
 def make_tx(tx_id: str, parents: list[str] = None, sender: str = "alice") -> TransactionVertex:
-    """Хелпер: создаёт минимальную транзакцию для тестов DAG."""
     tx = TransactionVertex(
         sender=sender,
         receiver="bob",
@@ -25,8 +24,6 @@ def make_tx(tx_id: str, parents: list[str] = None, sender: str = "alice") -> Tra
     tx.tx_id = tx_id
     return tx
  
- 
-# --- add_transaction ---
  
 def test_add_transaction_stores_vertex():
     dag = DAG()
@@ -50,7 +47,6 @@ def test_add_transaction_removes_parent_from_tips():
     tx2 = make_tx("tx2", parents=["tx1"])
     dag.add_transaction(tx2)
  
-    # tx1 больше не tip — у него есть ребёнок
     assert "tx1" not in dag.get_tips()
     assert "tx2" in dag.get_tips()
  
@@ -63,8 +59,6 @@ def test_add_duplicate_raises():
         dag.add_transaction(tx)
  
  
-# --- propagate_weight ---
- 
 def test_propagate_weight_increments_parent():
     dag = DAG()
     tx1 = make_tx("tx1")
@@ -74,16 +68,13 @@ def test_propagate_weight_increments_parent():
     dag.add_transaction(tx2)
     dag.propagate_weight("tx2")
  
-    # у tx1 должен вырасти weight
-    assert dag.vertices["tx1"].weight == 2  # 1 начальный + 1 от tx2
- 
+    assert dag.vertices["tx1"].weight == 2  
  
 def test_propagate_weight_confirms_after_threshold():
     dag = DAG()
     tx0 = make_tx("tx0")
     dag.add_transaction(tx0)
 
-    # tx0 стартует с weight=1, нужно добавить 5 дочерних чтобы weight=6
     for i in range(1, 6):
         tx = make_tx(f"tx{i}", parents=["tx0"], sender=f"user{i}")
         dag.add_transaction(tx)
@@ -98,7 +89,6 @@ def test_propagate_weight_does_not_confirm_below_threshold():
     tx0 = make_tx("tx0")
     dag.add_transaction(tx0)
 
-    # добавляем только 4 — weight станет 5, не хватает до порога
     for i in range(1, 5):
         tx = make_tx(f"tx{i}", parents=["tx0"], sender=f"user{i}")
         dag.add_transaction(tx)
@@ -106,8 +96,6 @@ def test_propagate_weight_does_not_confirm_below_threshold():
 
     assert dag.vertices["tx0"].status == TX_STATUS_PENDING
  
- 
-# --- get_tips ---
  
 def test_get_tips_excludes_conflict():
     dag = DAG()
@@ -127,8 +115,6 @@ def test_get_tips_excludes_rejected():
  
     assert "tx1" not in dag.get_tips()
  
- 
-# --- stats ---
  
 def test_stats_counts_correctly():
     from app.ledger.transaction import TX_STATUS_REJECTED

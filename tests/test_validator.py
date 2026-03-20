@@ -113,7 +113,7 @@ def test_state_insufficient_balance():
     v = Validator()
     wallet = Wallet.generate()
     state = LedgerState()
-    state.credit(wallet.address, 5)  # баланса не хватит
+    state.credit(wallet.address, 5)
     dag = DAG()
     tx = make_valid_tx(wallet, dag, state, amount=10)
     result = v.validate_state(tx, state)
@@ -190,7 +190,7 @@ def test_signature_valid():
     result = v.validate_signature(tx)
     assert result.ok
  
- 
+
 def test_signature_wrong_key():
     v = Validator()
     wallet_a = Wallet.generate()
