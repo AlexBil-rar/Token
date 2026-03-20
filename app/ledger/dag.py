@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from app.config import CONFIRMATION_THRESHOLD  # добавить этот импорт
+from app.config import CONFIRMATION_THRESHOLD
 from app.ledger.transaction import (
     TX_STATUS_CONFIRMED,
     TX_STATUS_REJECTED,
