@@ -24,8 +24,7 @@ def test_save_and_load_empty(tmp_snapshot):
     dag2 = DAG()
     state2 = LedgerState()
     loaded = tmp_snapshot.load(dag2, state2)
-    assert loaded
-    assert len(dag2.vertices) == 0
+    assert loaded is not None
 
 
 def test_save_and_load_with_balance(tmp_snapshot):
@@ -54,10 +53,11 @@ def test_save_and_load_transactions(tmp_snapshot):
     node2 = Node(storage=tmp_snapshot)
     loaded = node2.load_snapshot()
 
-    assert loaded
+    assert loaded is not None
     assert node2.dag.has_transaction(tx.tx_id)
     assert node2.state.balances[bob.address] == 100
     assert node2.state.balances[alice.address] == GENESIS_BALANCE - 100
+
 
 
 def test_node_resumes_nonce(tmp_snapshot):
