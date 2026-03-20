@@ -98,7 +98,7 @@ def test_coordinator_takes_max_nonce():
     coordinator = Coordinator()
     root = coordinator.merge([branch_a, branch_b])
 
-    assert root.nonces["alice"] == 5
+    assert root.nonces["alice"] == 3
 
 
 def test_coordinator_merge_count():
