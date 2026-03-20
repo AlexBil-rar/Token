@@ -53,14 +53,22 @@ class Validator:
         return ValidationResult(True, "ok", "parents valid")
 
     def validate_signature(self, tx: TransactionVertex) -> ValidationResult:
+        from app.crypto.wallet import verify_signature
+ 
+        # адрес должен совпадать с публичным ключом
         derived_address = sha256_hex(tx.public_key.encode())[:40]
         if derived_address != tx.sender:
             return ValidationResult(False, "bad_signature", "sender does not match public key")
-
+ 
         if not tx.signature:
             return ValidationResult(False, "bad_signature", "missing signature")
-
-        return ValidationResult(True, "ok", "signature placeholder valid")
+ 
+        # реальная проверка Ed25519 подписи
+        valid = verify_signature(tx.public_key, tx.signing_payload(), tx.signature)
+        if not valid:
+            return ValidationResult(False, "bad_signature", "signature verification failed")
+ 
+        return ValidationResult(True, "ok", "signature valid")
 
     def validate_anti_spam(self, tx: TransactionVertex) -> ValidationResult:
         expected_hash = tx.compute_anti_spam_hash()

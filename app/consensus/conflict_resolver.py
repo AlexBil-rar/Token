@@ -1,3 +1,7 @@
+# app/consensus/conflict_resolver.py
+
+# TODO: унифицировать с ConflictResolver на следующем этапе
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -5,7 +9,6 @@ from dataclasses import dataclass, field
 from app.ledger.dag import DAG
 from app.ledger.transaction import (
     TX_STATUS_CONFLICT,
-    TX_STATUS_PENDING,
     TransactionVertex,
 )
 

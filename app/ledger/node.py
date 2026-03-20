@@ -12,6 +12,8 @@ from app.ledger.mempool import Mempool
 from app.ledger.state import LedgerState
 from app.ledger.transaction import TransactionVertex
 from app.ledger.validator import ValidationResult, Validator
+from app.consensus.tip_selector import TipSelector
+
 
 
 @dataclass
@@ -22,6 +24,10 @@ class Node:
     validator: Validator = field(default_factory=Validator)
     mempool: Mempool = field(default_factory=Mempool)
     consensus: ConsensusEngine = field(default_factory=ConsensusEngine)
+    tip_selector: TipSelector = field(default_factory=TipSelector)  # добавить
+
+    def select_parents(self) -> list[str]:
+        return self.tip_selector.select(self.dag)  # заменить весь метод
 
     def bootstrap_genesis(self, address: str, balance: int) -> None:
         self.state.credit(address, balance)

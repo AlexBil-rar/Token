@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from app.config import CONFIRMATION_THRESHOLD  # добавить этот импорт
 from app.ledger.transaction import (
     TX_STATUS_CONFIRMED,
     TX_STATUS_REJECTED,
@@ -36,7 +37,7 @@ class DAG:
 
             parent.weight += 1
 
-            if parent.weight >= 6 and parent.status != TX_STATUS_REJECTED:
+            if parent.weight >= CONFIRMATION_THRESHOLD and parent.status != TX_STATUS_REJECTED:
                 parent.status = TX_STATUS_CONFIRMED
 
             stack.extend(parent.parents)
@@ -69,14 +70,6 @@ class DAG:
 
     def get_children(self, tx_id: str) -> list[str]:
         return list(self.children_map.get(tx_id, set()))
-
-    def increment_parent_weights(self, tx: TransactionVertex) -> None:
-        for parent_id in tx.parents:
-            parent = self.vertices.get(parent_id)
-            if parent is not None:
-                parent.weight += 1
-                if parent.weight >= 6 and parent.status != TX_STATUS_REJECTED:
-                    parent.status = TX_STATUS_CONFIRMED
 
     def stats(self) -> dict[str, int]:
         confirmed = 0
