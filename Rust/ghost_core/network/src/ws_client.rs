@@ -63,6 +63,7 @@ impl WsClient {
             let (mut ws, _): (WsStream, _) = connect_async(&url_str).await.ok()?;
             ws.send(Message::Text(msg.to_json())).await.ok()?;
             let raw = ws.next().await?.ok()?;
+            let _ = ws.close(None).await;  // ← ЭТА СТРОКА
             if let Message::Text(text) = raw {
                 let response = WsMessage::from_json(&text).ok()?;
                 if response.msg_type == MessageType::StateResponse {

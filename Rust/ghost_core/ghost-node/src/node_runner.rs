@@ -14,6 +14,7 @@ use storage::snapshot::SnapshotStorage;
 use crate::cli::Cli;
 use crate::genesis;
 use crate::ws_server;
+use crate::peer_discovery;
 
 pub async fn run(cli: Cli) -> Result<(), String> {
     std::fs::create_dir_all(&cli.data_dir)
@@ -74,6 +75,22 @@ pub async fn run(cli: Cli) -> Result<(), String> {
 
     let port = cli.port;
 
+    let discovery_peers = Arc::clone(&peers);
+    let discovery_task = tokio::spawn(async move {
+        peer_discovery::run_discovery_loop(discovery_peers, port, 30).await;
+    });
+
+    let health_peers = Arc::clone(&peers);
+    let health_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(60)
+        );
+        loop {
+            interval.tick().await;
+            peer_discovery::health_check(Arc::clone(&health_peers)).await;
+        }
+    });
+
     let server_node = Arc::clone(&node);
     let server_peers = Arc::clone(&peers);
     let server_task = tokio::spawn(async move {
@@ -106,6 +123,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     }
 
     server_task.abort();
+    discovery_task.abort();
+    health_task.abort();
     snapshot_task.abort();
 
     {

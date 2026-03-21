@@ -4,6 +4,9 @@ mod cli;
 mod node_runner;
 mod genesis;
 mod ws_server;
+mod bootstrap;
+mod peer_discovery;
+mod gossip;
 
 use clap::Parser;
 use tracing::info;
