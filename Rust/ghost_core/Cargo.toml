@@ -5,8 +5,8 @@ members = [
     "consensus",
     "storage",
     "token",
-    "branches", "network",
+    "branches", 
+    "network", 
+    "ghost-node",
 ]
 resolver = "2"
-url = "2"
-

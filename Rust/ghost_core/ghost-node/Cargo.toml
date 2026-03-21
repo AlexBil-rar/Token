@@ -1,0 +1,23 @@
+[package]
+name = "ghost-node"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ghostledger"
+path = "src/main.rs"
+
+[dependencies]
+ledger = { path = "../ledger" }
+consensus = { path = "../consensus" }
+storage = { path = "../storage" }
+network = { path = "../network" }
+token = { path = "../token" }
+branches = { path = "../branches" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde_json = "1"
+tokio-tungstenite = "0.21"
+futures-util = "0.3"

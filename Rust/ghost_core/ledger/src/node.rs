@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_mine_anti_spam() {
-        let mut node = Node::new();
+        let node = Node::new();
         let mut tx = TransactionVertex::new(
             "alice".to_string(), "bob".to_string(),
             100, 1, 1000, "pk".to_string(), vec![],

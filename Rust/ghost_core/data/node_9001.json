@@ -1,0 +1,13 @@
+{
+  "vertices": {},
+  "state": {
+    "balances": {
+      "c89b37dc95c9c89d5e5d34ab1f4efb601cca1f8f": 10000000
+    },
+    "nonces": {
+      "c89b37dc95c9c89d5e5d34ab1f4efb601cca1f8f": 0
+    },
+    "applied_txs": []
+  },
+  "wallet": {}
+}
