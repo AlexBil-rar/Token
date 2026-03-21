@@ -1,6 +1,14 @@
 # app/config.py
 
 # --- const ---
+MIN_STAKE = 1_000           # минимальный залог для участия в сети
+SLASH_PERCENT = 0.10        # 10% от stake за каждое нарушение
+SLASH_BURN_RATIO = 0.50     # 50% slash идёт на сжигание (дефляция)
+SLASH_POOL_RATIO = 0.50     # 50% slash идёт честным узлам
+MAX_VIOLATIONS = 3          # после 3 нарушений — исключение из сети
+
+
+# --- const ---
 REGISTRATION_POW_DIFFICULTY = 5       # сложность PoW при регистрации узла
 MIN_REPUTATION = 0.0
 MAX_REPUTATION = 1.0
