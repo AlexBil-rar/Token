@@ -26,6 +26,7 @@ class TransactionVertex:
     signature: str = ""
     anti_spam_nonce: int = 0
     anti_spam_hash: str = ""
+    ephemeral_pubkey: str = ""
     status: str = TX_STATUS_PENDING
     weight: int = 1
     tx_id: str = ""
@@ -40,6 +41,7 @@ class TransactionVertex:
             "public_key": self.public_key,
             "parents": self.parents,
             "anti_spam_nonce": self.anti_spam_nonce,
+            "ephemeral_pubkey": self.ephemeral_pubkey,
         }
         return stable_json_dumps(payload)
 
@@ -58,6 +60,7 @@ class TransactionVertex:
             "anti_spam_nonce": self.anti_spam_nonce,
             "anti_spam_hash": self.anti_spam_hash,
             "signature": self.signature,
+            "ephemeral_pubkey": self.ephemeral_pubkey,
         }
         return sha256_hex(stable_json_dumps(payload))
 
@@ -80,6 +83,7 @@ class TransactionVertex:
             "anti_spam_hash": self.anti_spam_hash,
             "status": self.status,
             "weight": self.weight,
+            "ephemeral_pubkey": self.ephemeral_pubkey,
         }
 
     @classmethod
@@ -98,4 +102,5 @@ class TransactionVertex:
             anti_spam_hash=data.get("anti_spam_hash", ""),
             status=data.get("status", TX_STATUS_PENDING),
             weight=data.get("weight", 1),
+            ephemeral_pubkey=data.get("ephemeral_pubkey", ""),
         )

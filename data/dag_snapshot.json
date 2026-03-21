@@ -1,50 +1,33 @@
 {
   "vertices": {
-    "ed972403d362292b4127e2dcf8934927225c6bfb00b65fc30d87e050f85abfcc": {
-      "tx_id": "ed972403d362292b4127e2dcf8934927225c6bfb00b65fc30d87e050f85abfcc",
-      "sender": "f2074ea29c0a57d1e09f3ca8f18e77d162ad8b12",
-      "receiver": "9f9e20f7e9e74bdaf10b412c29d5d68b4ed3ceaa",
-      "amount": 10,
+    "322144042e0e72d816327e399a6867e1f96b72b00ede29c6136610d450c7705b": {
+      "tx_id": "322144042e0e72d816327e399a6867e1f96b72b00ede29c6136610d450c7705b",
+      "sender": "8ef8ac7a732733dbf152dafbfda08a5591984b22",
+      "receiver": "e4dce0b7d6dc7244b87413d6a3c3a803cb504524",
+      "amount": 100,
       "nonce": 1,
-      "timestamp": 1774047799,
-      "public_key": "68e837c875344df27d895e1b48fe2e41bc0e781291e4e0a182d609bd7fccdc08",
+      "timestamp": 1774087227,
+      "public_key": "0e36d9ec8be78c79c7eebe8e9bfea30f17afc15a9de15ee0c7f7657dca7e4469",
       "parents": [],
-      "signature": "493a17ad254c6a19ec304b4927ce482603bed9899dd89f75ec0b75947193a23b68f29fce3430127a1afb86cf6c7d48e9e3b1fff6f5f4f8f4e12e2358bd9ea609",
-      "anti_spam_nonce": 8697,
-      "anti_spam_hash": "000b78d2bc72c19a1224296d9aebb8a08914e0879726347dfd9eaffa219a16d4",
+      "signature": "261ac0422ba02a61f6c0db9a4faa9289476b9fa45c92916317bc128b6f86eb9c3681dde61e86f18ab2b873da36698b3b3a22fe2b83d7dd967d747fa10e5f4b04",
+      "anti_spam_nonce": 1026,
+      "anti_spam_hash": "0004f9980d7f6cb70430e6920be04bf3a985b62b1f71662c7260a84ecacdd1ee",
       "status": "pending",
-      "weight": 2
-    },
-    "2467af053b5d2dae63c02b70d7f3a2d547a5a1db483750e820937487a44b3a53": {
-      "tx_id": "2467af053b5d2dae63c02b70d7f3a2d547a5a1db483750e820937487a44b3a53",
-      "sender": "f2074ea29c0a57d1e09f3ca8f18e77d162ad8b12",
-      "receiver": "9f9e20f7e9e74bdaf10b412c29d5d68b4ed3ceaa",
-      "amount": 10,
-      "nonce": 2,
-      "timestamp": 1774047799,
-      "public_key": "68e837c875344df27d895e1b48fe2e41bc0e781291e4e0a182d609bd7fccdc08",
-      "parents": [
-        "ed972403d362292b4127e2dcf8934927225c6bfb00b65fc30d87e050f85abfcc"
-      ],
-      "signature": "8257ca49826a5fae896ad651314ee3849d7b428954bcdd07d63a4131a7bbf09539d2b04a552ff6cca3178b9e5b95af587d08be968c7fc35bd1abe2380df38e0f",
-      "anti_spam_nonce": 32,
-      "anti_spam_hash": "0001838f591a6928944987f5735340f47bae4983b45a8697f7f6cd82acade282",
-      "status": "pending",
-      "weight": 1
+      "weight": 1,
+      "ephemeral_pubkey": "aff1d7c41985a52557c21798ef687e8ea178a891bb32db17c0d2b1bf8eb1a62c"
     }
   },
   "state": {
     "balances": {
-      "f2074ea29c0a57d1e09f3ca8f18e77d162ad8b12": 9999980,
-      "9f9e20f7e9e74bdaf10b412c29d5d68b4ed3ceaa": 20
+      "8ef8ac7a732733dbf152dafbfda08a5591984b22": 9999900,
+      "e4dce0b7d6dc7244b87413d6a3c3a803cb504524": 100
     },
     "nonces": {
-      "f2074ea29c0a57d1e09f3ca8f18e77d162ad8b12": 2,
-      "9f9e20f7e9e74bdaf10b412c29d5d68b4ed3ceaa": 0
+      "8ef8ac7a732733dbf152dafbfda08a5591984b22": 1,
+      "e4dce0b7d6dc7244b87413d6a3c3a803cb504524": 0
     },
     "applied_txs": [
-      "2467af053b5d2dae63c02b70d7f3a2d547a5a1db483750e820937487a44b3a53",
-      "ed972403d362292b4127e2dcf8934927225c6bfb00b65fc30d87e050f85abfcc"
+      "322144042e0e72d816327e399a6867e1f96b72b00ede29c6136610d450c7705b"
     ]
   },
   "wallet": {}
