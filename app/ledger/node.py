@@ -6,6 +6,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.ledger.pruner import Pruner
+
+
 from app.consensus.conflict_resolver import ConflictResolver
 from app.config import ANTI_SPAM_DIFFICULTY
 from app.consensus.engine import ConsensusEngine
@@ -29,6 +32,8 @@ class Node:
     consensus: ConsensusEngine = field(default_factory=ConsensusEngine)
     tip_selector: TipSelector = field(default_factory=TipSelector)
     storage: SnapshotStorage = field(default_factory=SnapshotStorage)
+    pruner: Pruner = field(default_factory=Pruner)
+
 
     def select_parents(self) -> list[str]:
         return self.tip_selector.select(self.dag)
@@ -92,7 +97,12 @@ class Node:
         )
 
         if any(item.tx_id == tx.tx_id for item in accepted):
-            self.save_snapshot()
+            self.save_snapshot()                  
+            
+            if self.pruner.should_prune(self.dag):
+                result = self.pruner.prune(self.dag, self.state)
+                print(f"Pruned {result.pruned_count} old transactions")
+
             return ValidationResult(True, "accepted", "transaction accepted")
 
         return ValidationResult(False, "not_committed", "transaction did not pass consensus")
