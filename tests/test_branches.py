@@ -114,9 +114,8 @@ def test_branch_manager_routes_deterministically():
     manager.create_branch("A")
     manager.create_branch("B")
 
-    alice = Wallet.generate()
-    branch1 = manager.get_branch_for(alice.address)
-    branch2 = manager.get_branch_for(alice.address)
+    branch1 = manager.get_least_loaded_branch()
+    branch2 = manager.get_least_loaded_branch()
 
     assert branch1.branch_id == branch2.branch_id
 
@@ -131,7 +130,7 @@ def test_branch_manager_submit_updates_coordinator():
     manager.credit(alice.address, GENESIS_BALANCE)
 
     node = Node()
-    branch = manager.get_branch_for(alice.address)
+    branch = manager.get_least_loaded_branch()
     node.state = branch.state
     node.dag = branch.dag
     tx = node.create_transaction(alice, bob.address, 100)

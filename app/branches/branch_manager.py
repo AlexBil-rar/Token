@@ -14,22 +14,22 @@ from app.ledger.validator import ValidationResult
 class BranchManager:
     branches: dict[str, Branch] = field(default_factory=dict)
     coordinator: Coordinator = field(default_factory=Coordinator)
+    
 
     def create_branch(self, branch_id: str) -> Branch:
         branch = Branch(branch_id=branch_id)
         self.branches[branch_id] = branch
         return branch
 
-    def get_branch_for(self, address: str) -> Branch:
-        if not self.branches:
-            raise ValueError("no branches available")
 
-        branch_ids = sorted(self.branches.keys())
-        index = int(address[0], 16) % len(branch_ids)
-        return self.branches[branch_ids[index]]
+    def get_least_loaded_branch(self) -> Branch:
+        return min(
+            self.branches.values(),
+            key=lambda b: b.mempool.size()
+        )
 
     def submit_transaction(self, tx: TransactionVertex) -> ValidationResult:
-        branch = self.get_branch_for(tx.sender)
+        branch = self.get_least_loaded_branch()
         result = branch.submit_transaction(tx)
 
         if result.ok:
