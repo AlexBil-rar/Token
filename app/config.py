@@ -1,6 +1,17 @@
 # app/config.py
 
 # --- const ---
+REGISTRATION_POW_DIFFICULTY = 5       # сложность PoW при регистрации узла
+MIN_REPUTATION = 0.0
+MAX_REPUTATION = 1.0
+REPUTATION_GROWTH_PER_HOUR = 0.01     # +1% репутации за каждый час онлайн
+REPUTATION_PENALTY = 0.20             # -20% за плохое поведение
+REPUTATION_FULL_WEEKS = 1             # полная репутация через 1 неделю
+MAX_NODES_PER_IP = 3                  # максимум узлов с одного IP
+BEHAVIOUR_WINDOW = 100                # последние N голосований для анализа
+BEHAVIOUR_AGREEMENT_THRESHOLD = 0.95  # если согласен >95% времени — подозрительно
+
+# --- const ---
 TOTAL_SUPPLY = 21_000_000       
 GENESIS_SHARE = 0.10            
 ADDRESS_CAP = 0.001            
