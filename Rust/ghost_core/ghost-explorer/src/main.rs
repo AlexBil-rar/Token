@@ -16,7 +16,7 @@ use ratatui::{
     symbols,
     text::{Line, Span},
     widgets::{
-        Axis, Block, BorderType, Borders, Cell, Chart, Dataset, Gauge, GraphType,
+        Axis, Block, Borders, Cell, Chart, Dataset, GraphType,
         Paragraph, Row, Table, Tabs,
     },
     Frame, Terminal,
@@ -87,7 +87,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         let state_snap = state.lock().unwrap().clone();
-
         terminal.draw(|f| draw(f, &state_snap, tab))?;
 
         let timeout = tick.checked_sub(last_tick.elapsed()).unwrap_or_default();
@@ -96,23 +95,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('q'), _)
                     | (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
-                    (KeyCode::Tab, _) | (KeyCode::Right, _) => {
-                        tab = (tab + 1) % 3;
-                    }
-                    (KeyCode::BackTab, _) | (KeyCode::Left, _) => {
-                        tab = tab.saturating_sub(1);
-                    }
+                    (KeyCode::Tab, _) | (KeyCode::Right, _) => tab = (tab + 1) % 3,
+                    (KeyCode::BackTab, _) | (KeyCode::Left, _) => tab = tab.saturating_sub(1),
                     _ => {}
                 }
             }
         }
 
         if last_tick.elapsed() >= tick {
-            // Increment uptime
             if let Ok(mut s) = state.lock() {
-                if s.connected {
-                    s.uptime_secs += 1;
-                }
+                if s.connected { s.uptime_secs += 1; }
             }
             last_tick = Instant::now();
         }
@@ -134,7 +126,6 @@ async fn ws_loop(state: Arc<Mutex<AppState>>, url: String) {
                 }
 
                 loop {
-                    // Send explorer request
                     let req = serde_json::json!({
                         "type": "explorer_request",
                         "payload": {},
@@ -145,11 +136,7 @@ async fn ws_loop(state: Arc<Mutex<AppState>>, url: String) {
                         break;
                     }
 
-                    // Wait for response
-                    match tokio::time::timeout(
-                        Duration::from_secs(5),
-                        ws.next()
-                    ).await {
+                    match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
                         Ok(Some(Ok(Message::Text(text)))) => {
                             if let Ok(msg) = serde_json::from_str::<Value>(&text) {
                                 if msg["type"] == "explorer_response" {
@@ -172,9 +159,10 @@ async fn ws_loop(state: Arc<Mutex<AppState>>, url: String) {
             }
         }
 
-        let mut s = state.lock().unwrap();
-        s.connected = false;
-        drop(s);
+        {
+            let mut s = state.lock().unwrap();
+            s.connected = false;
+        }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
@@ -192,7 +180,8 @@ fn update_state(state: &Arc<Mutex<AppState>>, payload: &Value) {
         s.stats.peers = stats["peers"].as_u64().unwrap_or(0) as usize;
 
         let t = s.tps_history.len() as f64;
-        s.tps_history.push((t, s.stats.tps));
+        let tps = s.stats.tps;
+        s.tps_history.push((t, tps));
         if s.tps_history.len() > 30 {
             s.tps_history.remove(0);
             for (i, point) in s.tps_history.iter_mut().enumerate() {
@@ -207,7 +196,7 @@ fn update_state(state: &Arc<Mutex<AppState>>, payload: &Value) {
             sender: tx["sender"].as_str().unwrap_or("?").to_string(),
             receiver: tx["receiver"].as_str().unwrap_or("?").to_string(),
             amount: if tx["private"].as_bool().unwrap_or(false) {
-                "🔒 PRIVATE".to_string()
+                "[PRIVATE]".to_string()
             } else {
                 format!("{} GHOST", tx["amount"].as_u64().unwrap_or(0))
             },
@@ -227,7 +216,7 @@ const RED: Color = Color::Rgb(255, 51, 102);
 const BG: Color = Color::Rgb(6, 13, 20);
 
 fn draw(f: &mut Frame, state: &AppState, tab: usize) {
-    let size = f.area();
+    let size = f.size();
 
     let bg = Block::default().style(Style::default().bg(BG));
     f.render_widget(bg, size);
@@ -235,11 +224,11 @@ fn draw(f: &mut Frame, state: &AppState, tab: usize) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  
-            Constraint::Length(5),  
-            Constraint::Length(3),  
-            Constraint::Min(0),     
-            Constraint::Length(1),  
+            Constraint::Length(3),
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
         ])
         .split(size);
 
@@ -258,33 +247,23 @@ fn draw(f: &mut Frame, state: &AppState, tab: usize) {
 }
 
 fn draw_header(f: &mut Frame, state: &AppState, area: Rect) {
-    let (status_sym, status_color, status_text) = if state.connected {
-        ("●", ACCENT, format!("CONNECTED  {}  uptime {}s",
-            state.node_url, state.uptime_secs))
+    let (sym, color, text) = if state.connected {
+        ("●", ACCENT, format!("CONNECTED  {}  uptime {}s", state.node_url, state.uptime_secs))
     } else {
-        ("●", RED, format!("DISCONNECTED  {}  {}",
-            state.node_url,
-            state.error.as_deref().unwrap_or("")))
+        ("●", RED, format!("DISCONNECTED  {}  {}", state.node_url, state.error.as_deref().unwrap_or("")))
     };
 
     let line = Line::from(vec![
-        Span::styled("  GHOSTLEDGER ", Style::default()
-            .fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled("  GHOSTLEDGER ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
         Span::styled("EXPLORER  ", Style::default().fg(DIM)),
-        Span::styled(status_sym, Style::default().fg(status_color)),
+        Span::styled(sym, Style::default().fg(color)),
         Span::styled("  ", Style::default()),
-        Span::styled(status_text, Style::default().fg(DIM)),
+        Span::styled(text, Style::default().fg(DIM)),
     ]);
 
-    let block = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(Style::default().fg(DIM))
-        .border_type(BorderType::Plain);
-
     let p = Paragraph::new(line)
-        .block(block)
+        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(DIM)))
         .alignment(Alignment::Left);
-
     f.render_widget(p, area);
 }
 
@@ -305,26 +284,13 @@ fn draw_stats(f: &mut Frame, state: &AppState, area: Rect) {
     ];
 
     for (i, (label, value, color)) in stats.iter().enumerate() {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
-            .border_style(Style::default().fg(DIM));
-
         let content = vec![
-            Line::from(Span::styled(
-                label.to_string(),
-                Style::default().fg(DIM).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                value.to_string(),
-                Style::default().fg(*color).add_modifier(Modifier::BOLD),
-            )),
+            Line::from(Span::styled(label.to_string(), Style::default().fg(DIM).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(value.to_string(), Style::default().fg(*color).add_modifier(Modifier::BOLD))),
         ];
-
         let p = Paragraph::new(content)
-            .block(block)
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(DIM)))
             .alignment(Alignment::Center);
-
         f.render_widget(p, chunks[i]);
     }
 }
@@ -338,12 +304,9 @@ fn draw_tabs(f: &mut Frame, tab: usize, area: Rect) {
 
     let tabs = Tabs::new(titles)
         .select(tab)
-        .block(Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(DIM)))
+        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(DIM)))
         .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
-        .divider(Span::styled(" │ ", Style::default().fg(DIM)));
-
+        .divider(Span::styled(" | ", Style::default().fg(DIM)));
     f.render_widget(tabs, area);
 }
 
@@ -354,19 +317,14 @@ fn draw_transactions(f: &mut Frame, state: &AppState, area: Rect) {
         Cell::from("TO").style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
         Cell::from("AMOUNT").style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
         Cell::from("STATUS").style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
-        Cell::from("WEIGHT").style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
-    ])
-    .height(1)
-    .bottom_margin(0);
+        Cell::from("W").style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
+    ]).height(1);
 
     let rows: Vec<Row> = if state.transactions.is_empty() {
         vec![Row::new(vec![
             Cell::from(""),
             Cell::from("// NO TRANSACTIONS YET").style(Style::default().fg(DIM)),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
+            Cell::from(""), Cell::from(""), Cell::from(""), Cell::from(""),
         ])]
     } else {
         state.transactions.iter().map(|tx| {
@@ -377,43 +335,28 @@ fn draw_transactions(f: &mut Frame, state: &AppState, area: Rect) {
                 _           => DIM,
             };
             let amount_color = if tx.private { PURPLE } else { Color::White };
-
             Row::new(vec![
-                Cell::from(format!("{}…", tx.tx_id))
-                    .style(Style::default().fg(ACCENT2)),
-                Cell::from(format!("{}…", tx.sender))
-                    .style(Style::default().fg(DIM)),
-                Cell::from(format!("{}…", tx.receiver))
-                    .style(Style::default().fg(DIM)),
-                Cell::from(tx.amount.clone())
-                    .style(Style::default().fg(amount_color)),
-                Cell::from(tx.status.to_uppercase())
-                    .style(Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-                Cell::from(tx.weight.to_string())
-                    .style(Style::default().fg(DIM)),
+                Cell::from(format!("{}...", tx.tx_id)).style(Style::default().fg(ACCENT2)),
+                Cell::from(format!("{}...", tx.sender)).style(Style::default().fg(DIM)),
+                Cell::from(format!("{}...", tx.receiver)).style(Style::default().fg(DIM)),
+                Cell::from(tx.amount.clone()).style(Style::default().fg(amount_color)),
+                Cell::from(tx.status.to_uppercase()).style(Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                Cell::from(tx.weight.to_string()).style(Style::default().fg(DIM)),
             ])
         }).collect()
     };
 
     let title = format!(" TRANSACTIONS ({}) ", state.transactions.len());
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(18),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(16),
-            Constraint::Length(12),
-            Constraint::Min(6),
-        ],
-    )
+    let table = Table::new(rows, [
+        Constraint::Length(18), Constraint::Length(12), Constraint::Length(12),
+        Constraint::Length(16), Constraint::Length(12), Constraint::Min(4),
+    ])
     .header(header)
     .block(Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
         .border_style(Style::default().fg(DIM))
         .title(Span::styled(title, Style::default().fg(ACCENT))))
-    .row_highlight_style(Style::default().bg(Color::Rgb(10, 20, 30)));
+    .highlight_style(Style::default().bg(Color::Rgb(10, 20, 30)));
 
     f.render_widget(table, area);
 }
@@ -440,7 +383,6 @@ fn draw_tps_chart(f: &mut Frame, state: &AppState, area: Rect) {
     let chart = Chart::new(datasets)
         .block(Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
             .border_style(Style::default().fg(DIM))
             .title(Span::styled(" TPS HISTORY ", Style::default().fg(ACCENT))))
         .x_axis(Axis::default()
@@ -480,63 +422,42 @@ fn draw_dag(f: &mut Frame, state: &AppState, area: Rect) {
 
     let lines: Vec<Line> = txs.iter().enumerate().map(|(i, tx)| {
         let node_sym = match tx.status.as_str() {
-            "confirmed" => "◆",
-            "pending"   => "◇",
-            "conflict"  => "✕",
-            _           => "○",
+            "confirmed" => "◆", "pending" => "◇", "conflict" => "x", _ => "o",
         };
-
         let node_color = match tx.status.as_str() {
-            "confirmed" => ACCENT,
-            "pending"   => ORANGE,
-            "conflict"  => RED,
-            _           => DIM,
+            "confirmed" => ACCENT, "pending" => ORANGE, "conflict" => RED, _ => DIM,
         };
-
-        let connector = if i < txs.len() - 1 { "│" } else { " " };
-        let private_tag = if tx.private { " 🔒" } else { "" };
+        let connector = if i < txs.len() - 1 { "|" } else { " " };
+        let private_tag = if tx.private { " [PRIV]" } else { "" };
 
         Line::from(vec![
             Span::styled(format!("  {} ", node_sym), Style::default().fg(node_color)),
-            Span::styled(format!("{}…", tx.tx_id), Style::default().fg(ACCENT2)),
-            Span::styled(format!("  {}→{}", tx.sender, tx.receiver), Style::default().fg(DIM)),
-            Span::styled(format!("  {}", tx.amount), Style::default().fg(
-                if tx.private { PURPLE } else { Color::White }
-            )),
+            Span::styled(format!("{}...", tx.tx_id), Style::default().fg(ACCENT2)),
+            Span::styled(format!("  {}>{}", tx.sender, tx.receiver), Style::default().fg(DIM)),
+            Span::styled(format!("  {}", tx.amount), Style::default().fg(if tx.private { PURPLE } else { Color::White })),
             Span::styled(private_tag.to_string(), Style::default().fg(PURPLE)),
-            Span::styled(format!("  w:{}", tx.weight), Style::default().fg(DIM)),
-            Span::styled(format!("\n  {} ", connector), Style::default().fg(DIM)),
+            Span::styled(format!("  w:{} {}", tx.weight, connector), Style::default().fg(DIM)),
         ])
     }).collect();
 
     let p = Paragraph::new(lines)
         .block(Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
             .border_style(Style::default().fg(DIM))
-            .title(Span::styled(
-                format!(" DAG ({} tx) ", txs.len()),
-                Style::default().fg(ACCENT),
-            )))
-        .scroll((0, 0));
-
+            .title(Span::styled(format!(" DAG ({} tx) ", txs.len()), Style::default().fg(ACCENT))));
     f.render_widget(p, area);
 }
 
 fn draw_footer(f: &mut Frame, area: Rect) {
     let line = Line::from(vec![
         Span::styled("  [TAB]", Style::default().fg(ACCENT)),
-        Span::styled(" switch tab  ", Style::default().fg(DIM)),
-        Span::styled("[←][→]", Style::default().fg(ACCENT)),
-        Span::styled(" navigate  ", Style::default().fg(DIM)),
+        Span::styled(" switch  ", Style::default().fg(DIM)),
         Span::styled("[Q]", Style::default().fg(ACCENT)),
         Span::styled(" quit  ", Style::default().fg(DIM)),
         Span::styled("GhostLedger v0.1", Style::default().fg(DIM)),
     ]);
-
     let p = Paragraph::new(line)
         .style(Style::default().bg(Color::Rgb(4, 8, 12)))
         .alignment(Alignment::Left);
-
     f.render_widget(p, area);
 }

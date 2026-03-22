@@ -1,5 +1,7 @@
 // ghost-node/src/gossip.rs
 
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};

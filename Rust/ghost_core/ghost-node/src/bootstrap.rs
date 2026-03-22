@@ -1,5 +1,7 @@
 // ghost-node/src/bootstrap.rs
 
+#![allow(dead_code, unused)]
+
 use tracing::{info, warn};
 use network::ws_client::WsClient;
 use network::ws_message::{WsMessage, MessageType};

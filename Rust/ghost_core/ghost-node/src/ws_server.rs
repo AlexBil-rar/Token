@@ -10,7 +10,6 @@ use tracing::{info, warn, debug};
 use ledger::node::Node;
 use ledger::transaction::TransactionVertex;
 use network::peer_list::PeerList;
-use network::ws_client::WsClient;
 use network::ws_message::{WsMessage, MessageType};
 
 use crate::gossip;
