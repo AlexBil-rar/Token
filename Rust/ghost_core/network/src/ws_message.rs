@@ -19,6 +19,10 @@ pub enum MessageType {
     StateRequest,
     StateResponse,
     PeerList,
+    DifficultyRequest,
+    DifficultyResponse,
+    ExplorerRequest,
+    ExplorerResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

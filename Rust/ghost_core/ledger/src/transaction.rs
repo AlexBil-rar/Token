@@ -39,6 +39,8 @@ pub struct TransactionVertex {
     pub status: TxStatus,
     pub weight: u64,
     pub tx_id: String,
+    pub commitment: Option<String>,    
+    pub balance_proof: Option<String>,
 }
 
 impl TransactionVertex {
@@ -66,6 +68,8 @@ impl TransactionVertex {
             status: TxStatus::Pending,
             weight: 1,
             tx_id: String::new(),
+            commitment: None,
+            balance_proof: None,
         }
     }
 

@@ -7,6 +7,7 @@ members = [
     "token",
     "branches", 
     "network", 
-    "ghost-node",
+    "ghost-node", 
+    "ghost-explorer",
 ]
 resolver = "2"

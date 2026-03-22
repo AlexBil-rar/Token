@@ -133,6 +133,24 @@ impl Validator {
         ValidationResult::ok("ok", "anti spam valid")
     }
 
+    pub fn validate_anti_spam_with_difficulty(
+        &self,
+        tx: &TransactionVertex,
+        difficulty: usize,
+    ) -> ValidationResult {
+        let expected = tx.compute_anti_spam_hash();
+        if tx.anti_spam_hash != expected {
+            return ValidationResult::err("bad_pow", "anti spam hash mismatch");
+        }
+        let prefix = "0".repeat(difficulty);
+        if !tx.anti_spam_hash.starts_with(&prefix) {
+            return ValidationResult::err("bad_pow", &format!(
+                "difficulty {} not satisfied", difficulty
+            ));
+        }
+        ValidationResult::ok("ok", "anti spam valid")
+    }
+
     pub fn validate_duplicate(&self, tx: &TransactionVertex, dag: &DAG) -> ValidationResult {
         if dag.has_transaction(&tx.tx_id) {
             return ValidationResult::err("duplicate", "transaction already exists");
@@ -168,6 +186,27 @@ impl Validator {
             }
         }
 
+        ValidationResult::ok("ok", "transaction valid")
+    }
+
+    pub fn validate_full_with_difficulty(
+        &self,
+        tx: &TransactionVertex,
+        dag: &DAG,
+        state: &mut LedgerState,
+        difficulty: usize,
+    ) -> ValidationResult {
+        let checks: Vec<ValidationResult> = vec![
+            self.validate_structure(tx),
+            self.validate_duplicate(tx, dag),
+            self.validate_parents(tx, dag),
+            self.validate_signature(tx),
+            self.validate_anti_spam_with_difficulty(tx, difficulty),
+            self.validate_state(tx, state),
+        ];
+        for result in checks {
+            if !result.ok { return result; }
+        }
         ValidationResult::ok("ok", "transaction valid")
     }
 }

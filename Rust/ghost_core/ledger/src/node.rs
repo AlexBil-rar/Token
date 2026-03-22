@@ -7,8 +7,7 @@ use crate::state::LedgerState;
 use crate::transaction::TransactionVertex;
 use crate::validator::{ValidationResult, Validator};
 use crate::pruner::Pruner;
-
-const ANTI_SPAM_DIFFICULTY: usize = 3;
+use crate::anti_spam::AntiSpamController;
 
 pub struct WalletInfo {
     pub address: String,
@@ -22,6 +21,7 @@ pub struct Node {
     pub mempool: Mempool,
     pub validator: Validator,
     pub pruner: Pruner,
+    pub anti_spam: AntiSpamController,
 }
 
 impl Node {
@@ -32,6 +32,7 @@ impl Node {
             mempool: Mempool::new(),
             validator: Validator::new(),
             pruner: Pruner::default(),
+            anti_spam: AntiSpamController::new(),
         }
     }
 
@@ -51,18 +52,13 @@ impl Node {
         tips.into_iter().take(2).collect()
     }
 
+    pub fn current_difficulty(&self) -> usize {
+        self.anti_spam.current_difficulty()
+    }
+
     pub fn mine_anti_spam(&self, tx: &mut TransactionVertex) {
-        let prefix = "0".repeat(ANTI_SPAM_DIFFICULTY);
-        let mut nonce = 0u64;
-        loop {
-            tx.anti_spam_nonce = nonce;
-            let hash = tx.compute_anti_spam_hash();
-            if hash.starts_with(&prefix) {
-                tx.anti_spam_hash = hash;
-                return;
-            }
-            nonce += 1;
-        }
+        let difficulty = self.anti_spam.current_difficulty();
+        tx.mine_anti_spam(difficulty);
     }
 
     pub fn create_transaction(
@@ -96,7 +92,11 @@ impl Node {
     }
 
     pub fn submit_transaction(&mut self, tx: TransactionVertex) -> ValidationResult {
-        let result = self.validator.validate_full(&tx, &self.dag, &mut self.state);
+        let difficulty = self.anti_spam.current_difficulty();
+
+        let result = self.validator.validate_full_with_difficulty(
+            &tx, &self.dag, &mut self.state, difficulty,
+        );
         if !result.ok {
             return result;
         }
@@ -120,6 +120,7 @@ impl Node {
 
         self.dag.propagate_weight(&tx_id);
         self.mempool.remove(&tx_id);
+        self.anti_spam.record_transaction();
 
         if self.pruner.should_prune_default(&self.dag) {
             let result = self.pruner.prune(&mut self.dag, &self.state);
@@ -154,10 +155,6 @@ mod tests {
         }
     }
 
-    fn fake_sign(_payload: &[u8]) -> String {
-        "0".repeat(128)
-    }
-
     #[test]
     fn test_bootstrap_genesis() {
         let mut node = Node::new();
@@ -179,7 +176,9 @@ mod tests {
             100, 1, 1000, "pk".to_string(), vec![],
         );
         node.mine_anti_spam(&mut tx);
-        assert!(tx.anti_spam_hash.starts_with("000"));
+        let difficulty = node.current_difficulty();
+        let prefix = "0".repeat(difficulty);
+        assert!(tx.anti_spam_hash.starts_with(&prefix));
     }
 
     #[test]
@@ -187,5 +186,11 @@ mod tests {
         let node = Node::new();
         let stats = node.dag_stats();
         assert_eq!(stats.total_vertices, 0);
+    }
+
+    #[test]
+    fn test_initial_difficulty() {
+        let node = Node::new();
+        assert!(node.current_difficulty() >= 2);
     }
 }

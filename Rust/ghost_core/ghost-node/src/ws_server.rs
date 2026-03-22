@@ -13,6 +13,8 @@ use network::peer_list::PeerList;
 use network::ws_client::WsClient;
 use network::ws_message::{WsMessage, MessageType};
 
+use crate::gossip;
+
 pub type SharedNode = Arc<Mutex<Node>>;
 pub type SharedPeers = Arc<Mutex<PeerList>>;
 
@@ -112,13 +114,25 @@ async fn handle_message(
             handle_transaction(msg.payload, node, peers).await
         }
 
+        MessageType::DifficultyRequest => {
+            let difficulty = node.lock().await.current_difficulty();
+            let resp = WsMessage::new(
+                MessageType::DifficultyResponse,
+                serde_json::json!({"difficulty": difficulty}),
+            );
+            Some(resp.to_json())
+        }
+
         MessageType::StateRequest => {
             handle_state_request(node).await
         }
 
         MessageType::PeerList => {
-            handle_peer_list(msg.payload, peers).await;
-            None
+            handle_peer_list(msg.payload, peers).await
+        }
+
+        MessageType::ExplorerRequest => {
+            handle_explorer_request(node, peers).await
         }
 
         _ => None,
@@ -144,6 +158,8 @@ async fn handle_transaction(
     };
 
     let tx_id_short = tx.tx_id[..16.min(tx.tx_id.len())].to_string();
+    let tx_clone = tx.clone();
+
     let result = {
         let mut n = node.lock().await;
         n.submit_transaction(tx)
@@ -151,22 +167,7 @@ async fn handle_transaction(
 
     if result.ok {
         info!("Transaction accepted: {}...", tx_id_short);
-
-        let peer_list = peers.lock().await.get_all();
-        if !peer_list.is_empty() {
-            let broadcast_msg = WsMessage::new(MessageType::Transaction, payload);
-            let json = broadcast_msg.to_json();
-            for peer_url in peer_list {
-                let json = json.clone();
-                tokio::spawn(async move {
-                    debug!("Gossiping tx to {}", peer_url);
-                    let client = WsClient::with_timeout(3);
-                    let msg = WsMessage::from_json(&json).unwrap_or_else(|_| WsMessage::ping());
-                    let _ = client.ping(&peer_url).await;
-                    drop(msg);
-                });
-            }
-        }
+        gossip::broadcast_transaction(&tx_clone, Arc::clone(peers), None).await;
     } else {
         debug!("Transaction rejected: {} — {}", tx_id_short, result.reason);
     }
@@ -192,7 +193,7 @@ async fn handle_state_request(node: &SharedNode) -> Option<String> {
 async fn handle_peer_list(
     payload: serde_json::Value,
     peers: &SharedPeers,
-) {
+) -> Option<String> {
     if let Some(peer_arr) = payload.get("peers").and_then(|p| p.as_array()) {
         let mut peer_list = peers.lock().await;
         for p in peer_arr {
@@ -201,5 +202,63 @@ async fn handle_peer_list(
                 debug!("Added peer from peer list: {}", addr);
             }
         }
+        let my_peers = peer_list.get_all();
+        let resp_payload = serde_json::json!({ "peers": my_peers });
+        let resp = WsMessage::new(MessageType::PeerList, resp_payload);
+        Some(resp.to_json())
+    } else {
+        None
     }
+}
+
+async fn handle_explorer_request(
+    node: &SharedNode,
+    peers: &SharedPeers,
+) -> Option<String> {
+    let n = node.lock().await;
+    let stats = n.dag_stats();
+    let difficulty = n.current_difficulty();
+    let tps = n.anti_spam.current_tps();
+    let peer_count = peers.lock().await.size();
+
+    let mut txs: Vec<serde_json::Value> = n.dag.vertices.values()
+        .map(|tx| serde_json::json!({
+            "tx_id": &tx.tx_id[..16.min(tx.tx_id.len())],
+            "sender": &tx.sender[..8.min(tx.sender.len())],
+            "receiver": &tx.receiver[..8.min(tx.receiver.len())],
+            "amount": if tx.commitment.is_some() {
+                serde_json::Value::String("private".to_string())
+            } else {
+                serde_json::Value::Number(tx.amount.into())
+            },
+            "private": tx.commitment.is_some(),
+            "status": tx.status.as_str(),
+            "timestamp": tx.timestamp,
+            "parents": tx.parents.len(),
+            "weight": tx.weight,
+        }))
+        .collect();
+
+    txs.sort_by(|a, b| {
+        let ta = a["timestamp"].as_u64().unwrap_or(0);
+        let tb = b["timestamp"].as_u64().unwrap_or(0);
+        tb.cmp(&ta)
+    });
+    txs.truncate(50);
+
+    let payload = serde_json::json!({
+        "stats": {
+            "total_tx": stats.total_vertices,
+            "tips": stats.tips,
+            "confirmed": stats.confirmed,
+            "pending": stats.pending,
+            "difficulty": difficulty,
+            "tps": tps,
+            "peers": peer_count,
+        },
+        "transactions": txs,
+    });
+
+    let resp = WsMessage::new(MessageType::ExplorerResponse, payload);
+    Some(resp.to_json())
 }

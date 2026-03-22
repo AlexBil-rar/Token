@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GhostLedger Explorer</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #020408;
+    --bg2: #060d14;
+    --bg3: #0a1520;
+    --accent: #00f5c4;
+    --accent2: #0088ff;
+    --accent3: #ff3366;
+    --text: #c8d8e8;
+    --text-dim: #4a6080;
+    --border: #0f2a3f;
+    --confirmed: #00f5c4;
+    --pending: #ffaa00;
+    --conflict: #ff3366;
+    --private: #aa55ff;
+    --glow: 0 0 20px rgba(0, 245, 196, 0.15);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 15px;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,245,196,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,245,196,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  header {
+    padding: 24px 0 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .logo-icon {
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: var(--glow);
+    animation: pulse 3s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 10px rgba(0,245,196,0.2); }
+    50% { box-shadow: 0 0 25px rgba(0,245,196,0.5); }
+  }
+
+  .logo-icon svg { width: 22px; height: 22px; }
+
+  .logo-text h1 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: var(--accent);
+    text-shadow: 0 0 20px rgba(0,245,196,0.4);
+  }
+
+  .logo-text span {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent3);
+    animation: blink 1s ease-in-out infinite;
+  }
+
+  .status-dot.connected {
+    background: var(--accent);
+    animation: blink 2s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .status-text {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .connect-bar {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .connect-bar label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    white-space: nowrap;
+  }
+
+  .connect-bar input {
+    flex: 1;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    padding: 8px 14px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .connect-bar input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 10px rgba(0,245,196,0.1);
+  }
+
+  .btn {
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 8px 20px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+
+  .btn:hover {
+    background: var(--accent);
+    color: var(--bg);
+    box-shadow: 0 0 20px rgba(0,245,196,0.3);
+  }
+
+  .btn:active { transform: scale(0.97); }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 1px;
+    background: var(--border);
+    margin: 24px 0;
+    border: 1px solid var(--border);
+  }
+
+  .stat-card {
+    background: var(--bg2);
+    padding: 16px 20px;
+    transition: background 0.2s;
+  }
+
+  .stat-card:hover { background: var(--bg3); }
+
+  .stat-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .stat-value {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 22px;
+    font-weight: 400;
+    color: var(--accent);
+    text-shadow: 0 0 15px rgba(0,245,196,0.3);
+    transition: all 0.3s;
+  }
+
+  .stat-value.updated {
+    color: #fff;
+    text-shadow: 0 0 20px rgba(255,255,255,0.5);
+  }
+
+  .stat-value.blue { color: var(--accent2); text-shadow: 0 0 15px rgba(0,136,255,0.3); }
+  .stat-value.orange { color: #ffaa00; text-shadow: 0 0 15px rgba(255,170,0,0.3); }
+  .stat-value.purple { color: var(--private); text-shadow: 0 0 15px rgba(170,85,255,0.3); }
+
+  .main-layout {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: 1px;
+    background: var(--border);
+    margin-bottom: 24px;
+  }
+
+  .panel {
+    background: var(--bg2);
+  }
+
+  .panel-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .panel-title {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .panel-count {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  thead th {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 10px 20px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  tbody tr {
+    border-bottom: 1px solid rgba(15, 42, 63, 0.5);
+    transition: background 0.15s;
+    animation: fadeIn 0.3s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateX(-8px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  tbody tr:hover { background: var(--bg3); }
+
+  tbody td {
+    padding: 10px 20px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .tx-id { color: var(--accent2); }
+  .addr { color: var(--text-dim); }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-radius: 2px;
+  }
+
+  .badge-confirmed { background: rgba(0,245,196,0.1); color: var(--confirmed); border: 1px solid rgba(0,245,196,0.2); }
+  .badge-pending { background: rgba(255,170,0,0.1); color: var(--pending); border: 1px solid rgba(255,170,0,0.2); }
+  .badge-conflict { background: rgba(255,51,102,0.1); color: var(--conflict); border: 1px solid rgba(255,51,102,0.2); }
+  .badge-private { background: rgba(170,85,255,0.1); color: var(--private); border: 1px solid rgba(170,85,255,0.2); }
+
+  .dag-panel {
+    background: var(--bg2);
+    display: flex;
+    flex-direction: column;
+  }
+
+  #dag-canvas {
+    flex: 1;
+    min-height: 400px;
+    display: block;
+  }
+
+  .refresh-bar {
+    padding: 10px 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .refresh-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+  }
+
+  .progress-bar {
+    flex: 1;
+    height: 2px;
+    background: var(--border);
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.1s linear;
+    box-shadow: 0 0 8px rgba(0,245,196,0.5);
+  }
+
+  .empty-state {
+    padding: 60px 20px;
+    text-align: center;
+    color: var(--text-dim);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 1px;
+  }
+
+  .empty-state::before {
+    content: '// NO DATA';
+    display: block;
+    font-size: 18px;
+    margin-bottom: 8px;
+    color: var(--border);
+  }
+
+  .error-msg {
+    padding: 12px 20px;
+    background: rgba(255,51,102,0.1);
+    border-left: 2px solid var(--accent3);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    color: var(--accent3);
+    display: none;
+  }
+
+  .error-msg.visible { display: block; }
+
+  @media (max-width: 1200px) {
+    .stats-grid { grid-template-columns: repeat(4, 1fr); }
+    .main-layout { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 768px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#00f5c4" stroke-width="1.5">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+          <path d="M2 17l10 5 10-5"/>
+          <path d="M2 12l10 5 10-5"/>
+        </svg>
+      </div>
+      <div class="logo-text">
+        <h1>GhostLedger</h1>
+        <span>BLOCK EXPLORER v0.1</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="status-dot" id="statusDot"></div>
+      <span class="status-text" id="statusText">DISCONNECTED</span>
+    </div>
+  </header>
+
+  <div class="connect-bar">
+    <label>NODE</label>
+    <input type="text" id="nodeUrl" value="ws://127.0.0.1:9000" placeholder="ws://127.0.0.1:9000" />
+    <button class="btn" onclick="connect()">CONNECT</button>
+    <button class="btn" onclick="disconnect()" style="border-color:#ff3366;color:#ff3366">DISCONNECT</button>
+  </div>
+
+  <div class="error-msg" id="errorMsg"></div>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Total TX</div>
+      <div class="stat-value" id="stat-total">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Tips</div>
+      <div class="stat-value blue" id="stat-tips">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Confirmed</div>
+      <div class="stat-value" id="stat-confirmed">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Pending</div>
+      <div class="stat-value orange" id="stat-pending">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Difficulty</div>
+      <div class="stat-value purple" id="stat-difficulty">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">TPS</div>
+      <div class="stat-value blue" id="stat-tps">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Peers</div>
+      <div class="stat-value" id="stat-peers">—</div>
+    </div>
+  </div>
+
+  <div class="main-layout">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Transactions</span>
+        <span class="panel-count" id="txCount">0 records</span>
+      </div>
+      <div id="txTableWrap">
+        <div class="empty-state">Connect to a node to view transactions</div>
+      </div>
+      <div class="refresh-bar">
+        <span class="refresh-label">AUTO-REFRESH</span>
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <span class="refresh-label" id="refreshCountdown">5s</span>
+      </div>
+    </div>
+
+    <div class="dag-panel">
+      <div class="panel-header">
+        <span class="panel-title">DAG Graph</span>
+        <span class="panel-count">last 20 tx</span>
+      </div>
+      <canvas id="dag-canvas"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let ws = null;
+let refreshTimer = null;
+let progressTimer = null;
+let progressStart = 0;
+const REFRESH_INTERVAL = 5000;
+let lastData = null;
+
+function connect() {
+  const url = document.getElementById('nodeUrl').value.trim();
+  if (ws) ws.close();
+
+  setStatus('connecting', 'CONNECTING...');
+  showError('');
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    setStatus('connected', 'CONNECTED');
+    fetchData();
+    startRefresh();
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'explorer_response') {
+        renderData(msg.payload);
+      }
+    } catch(e) {}
+  };
+
+  ws.onerror = () => {
+    setStatus('disconnected', 'ERROR');
+    showError('Cannot connect to node at ' + url);
+  };
+
+  ws.onclose = () => {
+    setStatus('disconnected', 'DISCONNECTED');
+    stopRefresh();
+  };
+}
+
+function disconnect() {
+  if (ws) ws.close();
+  stopRefresh();
+}
+
+function fetchData() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({
+    type: 'explorer_request',
+    payload: {},
+    timestamp: Date.now() / 1000,
+    sender: 'explorer'
+  }));
+}
+
+function startRefresh() {
+  stopRefresh();
+  progressStart = Date.now();
+
+  progressTimer = setInterval(() => {
+    const elapsed = Date.now() - progressStart;
+    const pct = Math.min((elapsed / REFRESH_INTERVAL) * 100, 100);
+    document.getElementById('progressFill').style.width = pct + '%';
+    const remaining = Math.max(0, Math.ceil((REFRESH_INTERVAL - elapsed) / 1000));
+    document.getElementById('refreshCountdown').textContent = remaining + 's';
+  }, 100);
+
+  refreshTimer = setInterval(() => {
+    fetchData();
+    progressStart = Date.now();
+  }, REFRESH_INTERVAL);
+}
+
+function stopRefresh() {
+  clearInterval(refreshTimer);
+  clearInterval(progressTimer);
+  document.getElementById('progressFill').style.width = '0%';
+}
+
+function setStatus(state, text) {
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  dot.className = 'status-dot' + (state === 'connected' ? ' connected' : '');
+  txt.textContent = text;
+}
+
+function showError(msg) {
+  const el = document.getElementById('errorMsg');
+  el.textContent = msg;
+  el.className = 'error-msg' + (msg ? ' visible' : '');
+}
+
+function renderData(data) {
+  lastData = data;
+  const stats = data.stats;
+
+  updateStat('stat-total', stats.total_tx ?? '0');
+  updateStat('stat-tips', stats.tips ?? '0');
+  updateStat('stat-confirmed', stats.confirmed ?? '0');
+  updateStat('stat-pending', stats.pending ?? '0');
+  updateStat('stat-difficulty', stats.difficulty ?? '—');
+  updateStat('stat-tps', stats.tps != null ? stats.tps.toFixed(2) : '0.00');
+  updateStat('stat-peers', stats.peers ?? '0');
+
+  const txs = data.transactions || [];
+  document.getElementById('txCount').textContent = txs.length + ' records';
+
+  const wrap = document.getElementById('txTableWrap');
+  if (txs.length === 0) {
+    wrap.innerHTML = '<div class="empty-state">No transactions yet</div>';
+  } else {
+    wrap.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>TX ID</th>
+            <th>FROM</th>
+            <th>TO</th>
+            <th>AMOUNT</th>
+            <th>STATUS</th>
+            <th>WEIGHT</th>
+            <th>PARENTS</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${txs.map(tx => `
+            <tr>
+              <td class="tx-id">${tx.tx_id}…</td>
+              <td class="addr">${tx.sender}…</td>
+              <td class="addr">${tx.receiver}…</td>
+              <td>${tx.private
+                ? '<span class="badge badge-private">🔒 PRIVATE</span>'
+                : tx.amount + ' GHOST'
+              }</td>
+              <td>${badgeHtml(tx.status)}</td>
+              <td>${tx.weight}</td>
+              <td>${tx.parents}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  drawDag(txs.slice(0, 20));
+}
+
+function updateStat(id, value) {
+  const el = document.getElementById(id);
+  if (el.textContent !== String(value)) {
+    el.textContent = value;
+    el.classList.add('updated');
+    setTimeout(() => el.classList.remove('updated'), 400);
+  }
+}
+
+function badgeHtml(status) {
+  const map = {
+    confirmed: 'badge-confirmed',
+    pending: 'badge-pending',
+    conflict: 'badge-conflict',
+    rejected: 'badge-conflict',
+  };
+  const cls = map[status] || 'badge-pending';
+  return `<span class="badge ${cls}">${status}</span>`;
+}
+
+function drawDag(txs) {
+  const canvas = document.getElementById('dag-canvas');
+  const ctx = canvas.getContext('2d');
+
+  canvas.width = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight || 400;
+
+  ctx.fillStyle = '#060d14';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (txs.length === 0) {
+    ctx.fillStyle = '#0f2a3f';
+    ctx.font = '12px Share Tech Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText('// NO TRANSACTIONS', canvas.width / 2, canvas.height / 2);
+    return;
+  }
+
+  const cols = Math.ceil(Math.sqrt(txs.length));
+  const rows = Math.ceil(txs.length / cols);
+  const cellW = canvas.width / (cols + 1);
+  const cellH = canvas.height / (rows + 1);
+
+  const positions = txs.map((tx, i) => ({
+    x: ((i % cols) + 1) * cellW,
+    y: (Math.floor(i / cols) + 1) * cellH,
+    tx,
+  }));
+
+  ctx.strokeStyle = 'rgba(0, 136, 255, 0.2)';
+  ctx.lineWidth = 1;
+  positions.forEach((pos, i) => {
+    if (i > 0 && pos.tx.parents > 0) {
+      const parentIdx = Math.max(0, i - 1);
+      const parent = positions[parentIdx];
+      ctx.beginPath();
+      ctx.moveTo(parent.x, parent.y);
+      ctx.bezierCurveTo(
+        parent.x, (parent.y + pos.y) / 2,
+        pos.x, (parent.y + pos.y) / 2,
+        pos.x, pos.y
+      );
+      ctx.stroke();
+    }
+  });
+
+  positions.forEach(({ x, y, tx }) => {
+    const color = tx.status === 'confirmed' ? '#00f5c4'
+                : tx.status === 'pending'   ? '#ffaa00'
+                : tx.status === 'conflict'  ? '#ff3366'
+                : '#aa55ff';
+
+    const grd = ctx.createRadialGradient(x, y, 0, x, y, 18);
+    grd.addColorStop(0, color + '40');
+    grd.addColorStop(1, 'transparent');
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.arc(x, y, 18, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(x, y, tx.weight > 3 ? 8 : 5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    if (tx.private) {
+      ctx.fillStyle = '#aa55ff';
+      ctx.font = '10px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('🔒', x, y - 12);
+    }
+
+    ctx.fillStyle = 'rgba(72, 96, 128, 0.8)';
+    ctx.font = '9px Share Tech Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText(tx.tx_id.slice(0, 6) + '…', x, y + 18);
+  });
+}
+
+window.addEventListener('resize', () => {
+  if (lastData) drawDag((lastData.transactions || []).slice(0, 20));
+});
+</script>
+</body>
+</html>
