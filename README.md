@@ -2,53 +2,46 @@
 
 **Feeless. Anonymous. User-powered.**
 
-GhostLedger is an experimental DAG-based ledger where transactions are free, anonymous by design, and validated by the users themselves — no miners, no gas fees, no middlemen.
+> An experimental DAG-based ledger exploring an architecture where transactions are free, private by design, and validated by the users themselves — no miners, no gas fees, no middlemen.
 
 ---
 
-## The Problem
+## Why this exists
 
-Every major cryptocurrency today forces you to pay to move your own money.
+Every major cryptocurrency forces you to pay to move your own money.
 
-- Bitcoin charges fees that spike during congestion
-- Ethereum gas prices can exceed the value of the transaction itself
-- Even "cheap" chains have fees that add up over time
+Bitcoin fees spike during congestion. Ethereum gas can exceed the value of the transaction. Even "cheap" chains have fees that add up. And beyond fees, most blockchains are pseudonymous at best — your address is public, your transaction graph is public, and with enough data analysis you can be identified.
 
-Beyond fees, most blockchains are pseudonymous at best. Your address is public. Your transaction graph is public. With enough data, you can be identified.
+GhostLedger is built around one question: *can feeless + anonymous + decentralized coexist in a single architecture?*
 
-**You shouldn't have to pay to send your own money. And no one should be able to trace where it goes.**
+This project is my attempt to find out.
 
 ---
 
-## The Solution
-
-GhostLedger is built around one hypothesis: *can you build a crypto network where users create, validate, and propagate transactions themselves — and privacy and spam protection are solved architecturally, not by fees?*
-
-The answer is yes. Here's how.
-
----
-
-## How It Works
+## How it works
 
 ### No miners. No fees.
 
-Instead of a blockchain where miners compete to add blocks, GhostLedger uses a **DAG (Directed Acyclic Graph)**. Every transaction is a vertex in the graph. To submit a transaction, you must reference and implicitly confirm two previous transactions. The network validates itself.
+Instead of a blockchain where miners compete to add blocks, GhostLedger uses a **DAG (Directed Acyclic Graph)**. Every transaction is a vertex. To submit one, you must reference and implicitly confirm two previous transactions. The network validates itself.
 
-Spam is prevented not by fees but by **lightweight Proof of Work** — each transaction requires a small computation that makes mass spam expensive without making normal use costly.
+Spam is handled not by fees but by **dynamic Proof of Work** — a lightweight computation that adjusts difficulty in real time based on network load. High traffic → higher difficulty. Low traffic → near-instant. The cost is milliseconds of CPU, not money.
 
 ```
-Your transaction → lightweight PoW → references 2 parents → confirmed by future transactions
+Your transaction
+  → lightweight PoW (auto-difficulty)
+  → references 2 parent transactions
+  → confirmed by future transactions building on top
 ```
 
-### Anonymous by design.
+### Stealth addresses
 
-GhostLedger implements **stealth addresses** — a cryptographic technique where every payment goes to a unique one-time address. The sender generates a fresh address for each payment using the recipient's public key. Only the recipient can discover that the payment belongs to them.
+Every payment goes to a unique one-time address. The sender generates a fresh address per payment using the recipient's public key. Only the recipient can discover that the payment belongs to them.
 
 ```
 Bob publishes:    spend_pubkey  (once, publicly)
 
 Alice pays Bob:
-  1. Generates random ephemeral key r
+  1. Generates ephemeral key r
   2. Computes stealth_address = ECDH(r, spend_pubkey)
   3. Publishes ephemeral_pubkey R in the transaction
 
@@ -57,104 +50,72 @@ Bob scans DAG:
   If match → this payment is mine
 ```
 
-An observer sees only a random address and an ephemeral key. Without Bob's private key, the payment cannot be linked to him.
+An outside observer sees only a random address and an ephemeral key. Without Bob's private key, the payment cannot be linked to him.
 
-### Cumulative weight consensus.
+### Pedersen Commitments (amount privacy)
 
-There are no block confirmations. Instead, each transaction accumulates **cumulative weight** as future transactions reference it. The more transactions built on top of yours, the more confirmed it is. This is O(1) per transaction and scales naturally with network activity.
-
-### Branch architecture with quorum voting.
-
-The network is split into independent **branches**, each processing its own subset of transactions in parallel. A **quorum-based coordinator** periodically merges branch states — a value is accepted only if the majority of branches agree on it. No single point of failure.
-
----
-
-## Key Features
-
-| Feature | Description |
-|---|---|
-| Feeless | No gas, no mining fees. Ever. |
-| Stealth addresses | One-time addresses per payment. Untrackable. |
-| DAG structure | Transactions confirm each other. No blocks. |
-| Anti-spam PoW | Lightweight — costs milliseconds, not money |
-| Ed25519 signatures | Production-grade asymmetric cryptography |
-| P2P gossip network | Transactions broadcast to all peers automatically |
-| Quorum consensus | Majority voting. No central authority. |
-| Pruning | Nodes store only recent transactions + current state. Fixed memory footprint. |
-| Persistent snapshots | Node state survives restarts. No history loss. |
-| GHOST token | 21M supply. Proof of Uptime rewards. Anti-whale mechanics. |
-| Sybil resistance | PoW registration + reputation + behaviour analysis |
-
----
-
-## GHOST Token
-
-The native token of the network is **GHOST**.
-
-- **Total supply:** 21,000,000 GHOST (fixed, like Bitcoin)
-- **Distribution:** Proof of Uptime — nodes earn GHOST for being online
-- **Anti-whale:** Diminishing returns on continuous uptime. Address cap at 0.1% of supply (21,000 GHOST max per address)
-- **Halvening:** Rewards halve every 4 years
-- **Purpose:** Governance and network participation. Transfers are always free regardless of token holdings.
+Transaction amounts can be hidden using **Pedersen commitments** on Ristretto255:
 
 ```
-Fresh node (first 24h):    100% reward rate
-24–72 hours continuous:     50% reward rate
-72h–1 week continuous:      25% reward rate
-Over 1 week continuous:     10% reward rate
+C = r·G + amount·H
 ```
 
-This makes it economically rational to have many small nodes rather than one large always-on server.
+The network can verify that inputs balance outputs without learning the actual amounts. Two modes are supported — transparent (amount visible) and private (commitment only), similar to how Zcash handles t/z addresses.
+
+### Stake-weighted conflict resolution
+
+Double-spends and conflicts are resolved by **stake-weighted DAG weight**:
+
+```
+score = dag_weight × (1 + stake)
+```
+
+Nodes with more stake have more say in conflict resolution. Ties are broken deterministically by transaction ID — no randomness, no timestamp manipulation.
+
+### Branch architecture *(experimental)*
+
+The network is split into independent **branches**, each processing its own subset of transactions in parallel. A quorum-based coordinator periodically merges branch states — a value is accepted only if the majority agree. This is an experimental feature; global state consistency across branches is an open research problem and the hardest part of this design.
 
 ---
 
 ## Architecture
 
 ```
+Rust workspace (production core)
+ghost_core/
+├── crypto/        Ed25519 wallets, SHA-256, stealth addresses, Pedersen commitments
+├── ledger/        Transaction model, DAG, state, mempool, validator, pruner, anti-spam
+├── consensus/     Stake-weighted conflict resolver, tip selector
+├── branches/      Branch, quorum coordinator, branch manager  [experimental]
+├── network/       WebSocket P2P, gossip broadcast, peer discovery, peer reputation
+├── storage/       JSON snapshot persistence
+├── token/         GHOST token, Proof of Uptime, halvening, staking
+├── ghost-node/    Binary node — CLI, genesis, bootstrap, node runner
+└── ghost-explorer TUI block explorer (ratatui)
+
+Python workspace (research prototype)
 app/
-├── crypto/
-│   ├── wallet.py          Ed25519 key generation and signing
-│   ├── hashing.py         SHA-256 utilities
-│   └── stealth.py         Stealth address generation and scanning
-├── ledger/
-│   ├── transaction.py     Transaction vertex model
-│   ├── dag.py             DAG graph, tips, cumulative weight
-│   ├── state.py           Balances, nonces, applied transactions
-│   ├── mempool.py         Pre-commit transaction buffer
-│   ├── validator.py       Structure, signature, PoW, state validation
-│   ├── node.py            Node orchestrator
-│   └── pruner.py          DAG pruning — recent window strategy
-├── consensus/
-│   ├── engine.py          Mempool commit, conflict resolution
-│   ├── conflict_resolver.py  Double-spend detection by sender+nonce
-│   └── tip_selector.py    Weighted random tip selection
-├── branches/
-│   ├── branch.py          Independent DAG branch
-│   ├── coordinator.py     Quorum-based state merge
-│   └── branch_manager.py  Transaction routing across branches
-├── network/
-│   ├── server.py          FastAPI HTTP node server
-│   ├── client.py          Gossip broadcast client
-│   ├── peer_list.py       Known peers registry
-│   └── peer_reputation.py Sybil resistance — PoW + reputation + behaviour
-├── storage/
-│   └── snapshot.py        JSON snapshot persistence
-└── token/
-    └── ghost.py           GHOST token — Proof of Uptime, halvening, anti-whale
+├── crypto/        wallet.py, hashing.py, stealth.py
+├── ledger/        transaction.py, dag.py, state.py, mempool.py, validator.py, node.py, pruner.py
+├── consensus/     engine.py, conflict_resolver.py, tip_selector.py
+├── branches/      branch.py, coordinator.py, branch_manager.py
+├── network/       server.py, client.py, peer_list.py, peer_reputation.py, ws_*.py
+├── storage/       snapshot.py
+└── token/         ghost.py, staking.py
 ```
 
 ---
 
-## Transaction Pipeline
+## Transaction pipeline
 
 ```
 Wallet
-  → anti-spam PoW
-  → stealth address (optional)
+  → anti-spam PoW (dynamic difficulty)
+  → stealth address or Pedersen commitment (optional)
   → Ed25519 signature
-  → Validator (structure, nonce, PoW, signature, state)
+  → Validator (structure, nonce, PoW, signature, state, commitment)
   → Mempool
-  → Consensus Engine (conflict check, state apply)
+  → Consensus engine (stake-weighted conflict resolution)
   → DAG (cumulative weight propagation)
   → Snapshot (persistent storage)
   → Pruner (memory management)
@@ -163,74 +124,119 @@ Wallet
 
 ---
 
-## Getting Started
+## Security model
 
-**Requirements:** Python 3.11+
-
-```bash
-git clone https://github.com/AlexBil-rar/Token
-cd Token
-pip install fastapi uvicorn httpx PyNaCl cryptography pytest
-```
-
-**Run two local nodes:**
-
-```bash
-# Terminal 1
-python3 run_node.py 8000
-
-# Terminal 2
-python3 run_node.py 8001
-```
-
-**Send a transaction:**
-
-```bash
-python3 send_tx.py <address> <private_key>
-```
-
-**Run tests:**
-
-```bash
-pytest tests/ -v
-```
-
-124 tests covering DAG, validator, consensus, stealth addresses, quorum, pruning, token, and P2P reputation.
+| Threat | Mitigation |
+|--------|------------|
+| Replay attacks | Per-sender nonce, enforced in validator |
+| Spam / DoS | Dynamic PoW, 1MB WS message limit |
+| Sybil attacks | PoW registration + peer reputation + behaviour analysis |
+| Peer flooding | MAX_PEERS=128 cap in peer list |
+| Double-spend | Stake-weighted conflict resolution, deterministic tiebreaker |
+| Arithmetic overflow | `saturating_sub/add` throughout state.rs |
+| Amount tracing | Pedersen commitments (optional private mode) |
+| Address linkability | Stealth addresses (one-time per payment) |
 
 ---
 
-## Compared to Existing Projects
+## GHOST Token
 
-| Project | Feeless | Anonymous | DAG | No miners |
-|---|---|---|---|---|
+- **Total supply:** 21,000,000 GHOST (fixed)
+- **Distribution:** Proof of Uptime — nodes earn GHOST for being online and serving the network
+- **Anti-whale:** Address cap at 21,000 GHOST (0.1% of supply). Diminishing returns on continuous uptime
+- **Halvening:** Rewards halve every 4 years
+- **Transfers:** Always free, regardless of token holdings
+
+```
+First 24h online:       100% reward rate
+24–72h continuous:       50% reward rate
+72h–1 week continuous:   25% reward rate
+Over 1 week continuous:  10% reward rate
+```
+
+This makes it rational to run many small nodes rather than one always-on server — better decentralization by design.
+
+---
+
+## Running a node
+
+**Requirements:** Rust 1.75+
+
+```bash
+git clone https://github.com/AlexBil-rar/Token
+cd Token/Rust/ghost_core
+```
+
+```bash
+# Genesis node
+cargo run --bin ghostledger -- --genesis --genesis-address <address> --port 9000
+
+# Connect a second node
+cargo run --bin ghostledger -- --port 9001 --peers ws://127.0.0.1:9000
+
+# TUI block explorer
+cargo run --bin ghost-explorer -- ws://127.0.0.1:9000
+```
+
+The web explorer (`explorer.html`) connects to any running node via WebSocket.
+
+---
+
+## Tests
+
+```
+Python:  158 tests  ✅
+Rust:    174 tests  ✅
+─────────────────────
+Total:   332 tests
+```
+
+Coverage: DAG, validator, consensus, stealth addresses, Pedersen commitments, quorum, pruner, token, P2P reputation, anti-spam, branches.
+
+```bash
+# Python
+pytest tests/ -v
+
+# Rust
+cargo test --workspace
+```
+
+---
+
+## Compared to existing work
+
+| Project | Feeless | Privacy | DAG | No miners |
+|---------|---------|---------|-----|-----------|
 | Bitcoin | ✗ | Partial | ✗ | ✗ |
 | Monero | ✗ | ✓ | ✗ | ✗ |
 | Nano | ✓ | ✗ | ✓ | ✓ |
 | IOTA | ✓ | ✗ | ✓ | ✓ |
 | **GhostLedger** | **✓** | **✓** | **✓** | **✓** |
 
-GhostLedger is the only project combining all four properties in a single architecture.
+Nano and IOTA solve feeless DAG. Monero solves privacy. GhostLedger explores combining all of them in one architecture — and whether the tradeoffs are manageable.
 
 ---
 
-## Technology Stack
+## Roadmap
 
-- **Python 3.11+** — research and prototyping
-- **PyNaCl** — Ed25519 signatures (same primitive as Solana, Cardano)
-- **cryptography** — X25519 ECDH for stealth addresses
-- **FastAPI + uvicorn** — P2P HTTP node server
-- **httpx** — async gossip broadcast
-- **pytest** — 124 tests
-
-Future: core rewrite in **Rust** for production performance.
+- [x] Phase 1 — Rust binary node
+- [x] Phase 2 — Real P2P (gossip, peer discovery, health checks)
+- [x] Phase 3 — Dynamic anti-spam (auto-adjusting PoW difficulty)
+- [x] Phase 4 — Stake-weighted conflict resolution
+- [ ] Phase 5 — Wallet app (Tauri + React)
+- [x] Phase 6 — Block explorer (web + TUI)
+- [x] Phase 7 — Amount privacy (Pedersen commitments)
+- [x] Phase 8 — Security audit
+- [ ] Phase 9 — Testnet (3 nodes, different regions)
+- [ ] Phase 10 — Mainnet
 
 ---
 
 ## Status
 
-This is an **experimental research project**. The goal is to prove the hypothesis that feeless + anonymous + decentralized can coexist in one architecture.
+Experimental research project. Working MVP with P2P network, stealth addresses, Pedersen commitments, stake-weighted consensus, and token economics. Not audited. Not production-ready.
 
-Current state: working MVP with P2P network, stealth addresses, quorum consensus, and token economics. Not audited. Not production-ready. Contributions and ideas welcome.
+Built solo. Contributions and criticism welcome.
 
 ---
 
