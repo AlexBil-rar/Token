@@ -7,12 +7,45 @@ use serde::{Deserialize, Serialize};
 use ledger::dag::DAG;
 use ledger::state::LedgerState;
 use ledger::transaction::TransactionVertex;
+use ledger::node::NodeStake;
 
 #[derive(Serialize, Deserialize)]
 struct SnapshotData {
     vertices: HashMap<String, TransactionVertex>,
     state: StateSnapshot,
     wallet: HashMap<String, String>,
+    #[serde(default)]
+    stakes: HashMap<String, StakeSnapshot>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct StakeSnapshot {
+    pub amount: u64,
+    pub original_amount: u64,
+    pub active: bool,
+    pub violations: u32,
+}
+
+impl From<&NodeStake> for StakeSnapshot {
+    fn from(s: &NodeStake) -> Self {
+        StakeSnapshot {
+            amount: s.amount,
+            original_amount: s.amount,
+            active: s.active,
+            violations: s.violations,
+        }
+    }
+}
+
+impl From<StakeSnapshot> for NodeStake {
+    fn from(s: StakeSnapshot) -> Self {
+        NodeStake {
+            address: String::new(),
+            amount: s.amount,
+            active: s.active,
+            violations: s.violations,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -41,6 +74,20 @@ impl SnapshotStorage {
         state: &LedgerState,
         wallet_data: Option<HashMap<String, String>>,
     ) -> Result<(), String> {
+        self.save_with_stakes(dag, state, wallet_data, &HashMap::new())
+    }
+
+    pub fn save_with_stakes(
+        &self,
+        dag: &DAG,
+        state: &LedgerState,
+        wallet_data: Option<HashMap<String, String>>,
+        stakes: &HashMap<String, NodeStake>,
+    ) -> Result<(), String> {
+        let stakes_snap: HashMap<String, StakeSnapshot> = stakes.iter()
+            .map(|(addr, s)| (addr.clone(), StakeSnapshot::from(s)))
+            .collect();
+
         let data = SnapshotData {
             vertices: dag.vertices.clone(),
             state: StateSnapshot {
@@ -49,13 +96,17 @@ impl SnapshotStorage {
                 applied_txs: state.applied_txs.iter().cloned().collect(),
             },
             wallet: wallet_data.unwrap_or_default(),
+            stakes: stakes_snap,
         };
 
         let json = serde_json::to_string_pretty(&data)
             .map_err(|e| format!("serialize error: {}", e))?;
 
-        fs::write(&self.path, json)
+        let tmp_path = self.path.with_extension("tmp");
+        fs::write(&tmp_path, &json)
             .map_err(|e| format!("write error: {}", e))?;
+        fs::rename(&tmp_path, &self.path)
+            .map_err(|e| format!("rename error: {}", e))?;
 
         Ok(())
     }
@@ -65,6 +116,14 @@ impl SnapshotStorage {
         dag: &mut DAG,
         state: &mut LedgerState,
     ) -> Result<Option<HashMap<String, String>>, String> {
+        self.load_with_stakes(dag, state).map(|opt| opt.map(|(w, _)| w))
+    }
+
+    pub fn load_with_stakes(
+        &self,
+        dag: &mut DAG,
+        state: &mut LedgerState,
+    ) -> Result<Option<(HashMap<String, String>, HashMap<String, NodeStake>)>, String> {
         if !self.path.exists() {
             return Ok(None);
         }
@@ -85,7 +144,15 @@ impl SnapshotStorage {
         state.nonces.extend(data.state.nonces);
         state.applied_txs.extend(data.state.applied_txs);
 
-        Ok(Some(data.wallet))
+        let stakes: HashMap<String, NodeStake> = data.stakes.into_iter()
+            .map(|(addr, snap)| {
+                let mut stake = NodeStake::from(snap);
+                stake.address = addr.clone();
+                (addr, stake)
+            })
+            .collect();
+
+        Ok(Some((data.wallet, stakes)))
     }
 
     pub fn exists(&self) -> bool {
@@ -103,6 +170,7 @@ mod tests {
     use ledger::dag::DAG;
     use ledger::state::LedgerState;
     use ledger::transaction::TransactionVertex;
+use ledger::node::NodeStake;
 
     fn tmp_path() -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -206,6 +274,78 @@ mod tests {
         let loaded = storage.load(&mut dag2, &mut state2).unwrap().unwrap();
 
         assert_eq!(loaded["address"], "abc123");
+        storage.delete();
+    }
+
+    #[test]
+    fn test_stakes_roundtrip() {
+        let path = tmp_path();
+        let storage = SnapshotStorage::new(&path);
+        let dag = DAG::new();
+        let state = LedgerState::new();
+
+        let mut stakes = HashMap::new();
+        stakes.insert("alice".to_string(), NodeStake {
+            address: "alice".to_string(),
+            amount: 5000,
+            active: true,
+            violations: 1,
+        });
+        stakes.insert("bob".to_string(), NodeStake {
+            address: "bob".to_string(),
+            amount: 1000,
+            active: false,
+            violations: 0,
+        });
+
+        storage.save_with_stakes(&dag, &state, None, &stakes).unwrap();
+
+        let mut dag2 = DAG::new();
+        let mut state2 = LedgerState::new();
+        let (_, loaded_stakes) = storage.load_with_stakes(&mut dag2, &mut state2)
+            .unwrap().unwrap();
+
+        assert_eq!(loaded_stakes.len(), 2);
+        assert_eq!(loaded_stakes["alice"].amount, 5000);
+        assert_eq!(loaded_stakes["alice"].active, true);
+        assert_eq!(loaded_stakes["alice"].violations, 1);
+        assert_eq!(loaded_stakes["bob"].amount, 1000);
+        assert_eq!(loaded_stakes["bob"].active, false);
+
+        storage.delete();
+    }
+
+    #[test]
+    fn test_empty_stakes_roundtrip() {
+        let path = tmp_path();
+        let storage = SnapshotStorage::new(&path);
+        let dag = DAG::new();
+        let state = LedgerState::new();
+
+        storage.save_with_stakes(&dag, &state, None, &HashMap::new()).unwrap();
+
+        let mut dag2 = DAG::new();
+        let mut state2 = LedgerState::new();
+        let (_, loaded_stakes) = storage.load_with_stakes(&mut dag2, &mut state2)
+            .unwrap().unwrap();
+
+        assert!(loaded_stakes.is_empty());
+        storage.delete();
+    }
+
+    #[test]
+    fn test_atomic_write_creates_no_tmp_on_success() {
+        let path = tmp_path();
+        let storage = SnapshotStorage::new(&path);
+        let dag = DAG::new();
+        let state = LedgerState::new();
+
+        storage.save(&dag, &state, None).unwrap();
+
+        let tmp = path.with_extension("tmp");
+        assert!(!tmp.exists(), ".tmp file should not exist after successful save");
+        assert!(path.exists(), "snapshot file should exist");
+
         storage.delete();
     }
 }
