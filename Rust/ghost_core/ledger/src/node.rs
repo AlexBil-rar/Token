@@ -11,6 +11,7 @@ use crate::pruner::Pruner;
 use crate::anti_spam::{AntiSpamController, RateLimitResult};
 use crate::merkle::{MerkleTree, StateCheckpoint};
 use crate::checkpoint::{CheckpointVertex, CheckpointRegistry};
+use crate::privacy::{DecoyPool, DiffusionConfig, ParentSelectionConfig, select_parents_with_privacy};
 
 pub struct WalletInfo {
     pub address: String,
@@ -57,6 +58,8 @@ pub struct Node {
     pub last_state_root: Option<String>,
     pub checkpoint_height: u64,
     pub checkpoint_registry: CheckpointRegistry,
+    pub decoy_pool: DecoyPool,
+    pub diffusion: DiffusionConfig,
 }
 
 impl Node {
@@ -72,6 +75,8 @@ impl Node {
             last_state_root: None,
             checkpoint_height: 0,
             checkpoint_registry: CheckpointRegistry::new(),
+            decoy_pool: DecoyPool::new(50),
+            diffusion: DiffusionConfig::default(),
         }
     }
 
@@ -86,10 +91,15 @@ impl Node {
 
     pub fn select_parents(&self) -> Vec<String> {
         let tips = self.dag.get_tips();
-        if tips.is_empty() {
-            return vec![];
-        }
+        if tips.is_empty() { return vec![]; }
         tips.into_iter().take(2).collect()
+    }
+
+    pub fn select_parents_private(&mut self) -> Vec<String> {
+        let tips = self.dag.get_tips();
+        if tips.is_empty() { return vec![]; }
+        let config = ParentSelectionConfig::default();
+        select_parents_with_privacy(&tips, &mut self.decoy_pool, &config, 2)
     }
 
     pub fn current_difficulty(&self) -> usize {
@@ -205,6 +215,10 @@ impl Node {
         self.checkpoint_registry.latest_finalized()
     }
 
+    pub fn relay_delay(&self, tx_id: &str) -> std::time::Duration {
+        self.diffusion.relay_delay(tx_id)
+    }
+
     pub fn verify_state_root(&self, expected_root: &str) -> Result<(), String> {
         let state_map: HashMap<String, (u64, u64)> = self.state.balances
             .iter()
@@ -225,7 +239,7 @@ impl Node {
         sign_fn: impl Fn(&[u8]) -> String,
     ) -> TransactionVertex {
         let nonce = self.state.get_nonce(&wallet.address) + 1;
-        let parents = self.select_parents();
+        let parents = self.select_parents_private();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -285,6 +299,7 @@ impl Node {
         self.dag.propagate_weight(&tx_id);
         self.mempool.remove(&tx_id);
         self.anti_spam.record_transaction();
+        self.decoy_pool.record(tx_id.clone());
 
         let total = self.dag.vertices.len() as u64;
         if total % 100 == 0 {
@@ -292,7 +307,7 @@ impl Node {
         }
 
         if let Some(cp_id) = self.maybe_create_dag_checkpoint() {
-            let _ = cp_id; 
+            let _ = cp_id;
         }
 
         if self.pruner.should_prune_default(&self.dag) {
@@ -321,6 +336,14 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_wallet(address: &str, public_key: &str) -> WalletInfo {
+        WalletInfo {
+            address: address.to_string(),
+            public_key: public_key.to_string(),
+            private_key_hex: String::new(),
+        }
+    }
 
     #[test]
     fn test_bootstrap_genesis() {
@@ -491,5 +514,68 @@ mod tests {
         let cp2 = node.create_checkpoint();
         assert_eq!(cp1.dag_height, 1);
         assert_eq!(cp2.dag_height, 2);
+    }
+
+    #[test]
+    fn test_select_parents_private_empty_dag() {
+        let mut node = Node::new();
+        assert!(node.select_parents_private().is_empty());
+    }
+
+    #[test]
+    fn test_select_parents_private_with_tips() {
+        let mut node = Node::new();
+        node.bootstrap_genesis("alice", 10_000);
+        use crate::transaction::TransactionVertex;
+        for i in 1..=5u64 {
+            let mut tx = TransactionVertex::new(
+                "alice".to_string(), "bob".to_string(),
+                10, i, 1000, "pk".to_string(), vec![],
+            );
+            tx.tx_id = format!("tx_{}", i);
+            node.dag.add_transaction(tx).unwrap();
+        }
+        let parents = node.select_parents_private();
+        assert!(!parents.is_empty());
+        assert!(parents.len() <= 2);
+    }
+
+    #[test]
+    fn test_decoy_pool_grows_with_transactions() {
+        let node = Node::new();
+        assert_eq!(node.decoy_pool.size(), 0);
+    }
+
+    #[test]
+    fn test_relay_delay_in_range() {
+        let node = Node::new();
+        let delay = node.relay_delay("tx_test_abc");
+        assert!(delay.as_millis() >= 50);
+        assert!(delay.as_millis() <= 500);
+    }
+
+    #[test]
+    fn test_relay_delay_deterministic() {
+        let node = Node::new();
+        let d1 = node.relay_delay("tx_same_id");
+        let d2 = node.relay_delay("tx_same_id");
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn test_relay_delay_different_for_different_txs() {
+        let node = Node::new();
+        let d1 = node.relay_delay("tx_aaaaaa");
+        let d2 = node.relay_delay("tx_zzzzzz");
+        assert!(d1.as_millis() >= 50 && d1.as_millis() <= 500);
+        assert!(d2.as_millis() >= 50 && d2.as_millis() <= 500);
+    }
+
+    #[test]
+    fn test_no_relay_delay_when_disabled() {
+        let mut node = Node::new();
+        node.diffusion = crate::privacy::DiffusionConfig::disabled();
+        let delay = node.relay_delay("any_tx_id");
+        assert_eq!(delay, std::time::Duration::ZERO);
     }
 }

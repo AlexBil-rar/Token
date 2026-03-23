@@ -10,6 +10,7 @@ use tracing::{info, warn, debug};
 use ledger::node::Node;
 use ledger::transaction::TransactionVertex;
 use network::peer_list::PeerList;
+use network::ws_client::WsClient;
 use network::ws_message::{WsMessage, MessageType};
 
 use crate::gossip;
@@ -67,10 +68,6 @@ async fn handle_connection(
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                if text.len() > 1_048_576 {
-                    warn!("Oversized message from {}: {} bytes", peer_addr, text.len());
-                    break;
-                }
                 let response = handle_message(&text, &node, &peers).await;
                 if let Some(resp) = response {
                     if let Err(e) = sender.send(Message::Text(resp)).await {
@@ -170,6 +167,16 @@ async fn handle_transaction(
 
     if result.ok {
         info!("Transaction accepted: {}...", tx_id_short);
+
+        let relay_delay = {
+            let n = node.lock().await;
+            n.relay_delay(&tx_clone.tx_id)
+        };
+
+        if !relay_delay.is_zero() {
+            tokio::time::sleep(relay_delay).await;
+        }
+
         gossip::broadcast_transaction(&tx_clone, Arc::clone(peers), None).await;
     } else {
         debug!("Transaction rejected: {} — {}", tx_id_short, result.reason);
