@@ -97,18 +97,6 @@ pub struct BranchSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ledger::transaction::TransactionVertex;
-
-    fn make_tx(sender: &str, receiver: &str, amount: u64, nonce: u64) -> TransactionVertex {
-        let mut tx = TransactionVertex::new(
-            sender.to_string(), receiver.to_string(),
-            amount, nonce, 1000, "pk".to_string(), vec![],
-        );
-        tx.anti_spam_hash = tx.compute_anti_spam_hash();
-        tx.signature = "0".repeat(128);
-        tx.finalize();
-        tx
-    }
 
     #[test]
     fn test_branch_creation() {

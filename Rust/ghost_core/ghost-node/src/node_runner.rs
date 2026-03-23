@@ -10,6 +10,7 @@ use ledger::node::Node;
 use network::peer_list::PeerList;
 use network::ws_client::WsClient;
 use storage::snapshot::SnapshotStorage;
+use consensus::conflict_resolver::ConflictResolver;
 
 use crate::cli::Cli;
 use crate::genesis;
@@ -32,6 +33,10 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         if let Some(addr) = wallet_data.get("address") {
             info!("Genesis address: {}", addr);
         }
+        node.update_state_root();
+        if let Some(root) = &node.last_state_root {
+            info!("State root: {}...", &root[..16]);
+        }
     } else {
         info!("No snapshot found — starting fresh");
         if cli.genesis {
@@ -40,16 +45,32 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                     if !genesis::validate_address(addr) {
                         return Err(format!("invalid genesis address: {}", addr));
                     }
-                    genesis::bootstrap(&mut node.state, addr);
+                    node.bootstrap_genesis(addr, 10_000_000);
                     let mut wallet_data = std::collections::HashMap::new();
                     wallet_data.insert("address".to_string(), addr.clone());
                     storage.save(&node.dag, &node.state, Some(wallet_data))
                         .map_err(|e| format!("failed to save genesis: {}", e))?;
                     info!("Genesis snapshot saved to {}", cli.snapshot_path());
+                    if let Some(root) = &node.last_state_root {
+                        info!("Genesis state root: {}...", &root[..16]);
+                    }
                 }
                 None => return Err("--genesis requires --genesis-address".to_string()),
             }
         }
+    }
+
+    let mut conflict_resolver = ConflictResolver::new();
+    for tx in node.dag.vertices.values() {
+        conflict_resolver.register_transaction(tx);
+    }
+
+    let stake_weights = node.stake_weights();
+    let total_stake = node.total_stake();
+    if !stake_weights.is_empty() {
+        info!("Resolving conflicts with stake weights ({} validators, total stake: {})",
+            stake_weights.len(), total_stake);
+        conflict_resolver.resolve_all_with_stake(&mut node.dag, &stake_weights, total_stake);
     }
 
     let mut peers = PeerList::new();
@@ -69,8 +90,9 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     {
         let n = node.lock().await;
         let stats = n.dag_stats();
-        info!("Node ready — DAG: {} tx, {} tips, {} confirmed",
-            stats.total_vertices, stats.tips, stats.confirmed);
+        let validator_count = n.stakes.values().filter(|s| s.is_validator()).count();
+        info!("Node ready — DAG: {} tx, {} tips, {} confirmed, {} validators",
+            stats.total_vertices, stats.tips, stats.confirmed, validator_count);
     }
 
     let port = cli.port;
@@ -105,9 +127,14 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let n = snapshot_node.lock().await;
+            let mut n = snapshot_node.lock().await;
+            n.update_state_root();
+            let root_short = n.last_state_root.as_ref()
+                .map(|r| &r[..16.min(r.len())])
+                .unwrap_or("none")
+                .to_string();
             match snapshot_storage.save(&n.dag, &n.state, None) {
-                Ok(_) => info!("Auto-snapshot saved"),
+                Ok(_) => info!("Auto-snapshot saved (root: {}...)", root_short),
                 Err(e) => warn!("Auto-snapshot failed: {}", e),
             }
         }
@@ -128,13 +155,17 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     snapshot_task.abort();
 
     {
-        let n = node.lock().await;
+        let mut n = node.lock().await;
+        n.update_state_root();
         match storage.save(&n.dag, &n.state, None) {
             Ok(_) => info!("Final snapshot saved"),
             Err(e) => warn!("Failed to save final snapshot: {}", e),
         }
         let stats = n.dag_stats();
         info!("Shutdown — DAG: {} tx, {} confirmed", stats.total_vertices, stats.confirmed);
+        if let Some(root) = &n.last_state_root {
+            info!("Final state root: {}...", &root[..16]);
+        }
     }
 
     info!("Goodbye.");
@@ -157,6 +188,7 @@ async fn sync_from_peers(node: Arc<Mutex<Node>>, peers: Arc<Mutex<PeerList>>) {
                             n.state.balances.insert(addr.clone(), balance);
                         }
                     }
+                    n.update_state_root();
                     info!("State synced from {} — {} accounts", peer_url, map.len());
                     return;
                 }

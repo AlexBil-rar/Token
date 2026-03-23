@@ -1,6 +1,6 @@
 // network/src/peer_list.rs
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAX_PEERS: usize = 128;
@@ -195,6 +195,8 @@ fn extract_subnet(address: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashSet};
+
 
     #[test]
     fn test_add_and_has() {

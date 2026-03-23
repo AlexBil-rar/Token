@@ -1,5 +1,4 @@
 // crypto/src/wallet.rs
-// Эквивалент app/crypto/wallet.py
 
 use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, Signature};
 use rand::rngs::OsRng;

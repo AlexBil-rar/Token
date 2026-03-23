@@ -314,7 +314,7 @@ mod tests {
         let b1 = BatchTransaction::new(
             "alice".to_string(), outputs.clone(), 1, "pk".to_string(), vec![],
         ).unwrap();
-        let b2 = BatchTransaction::new(
+        let _b2 = BatchTransaction::new(
             "alice".to_string(), outputs, 1, "pk".to_string(), vec![],
         ).unwrap();
         assert_eq!(b1.batch_id.len(), 64); 
