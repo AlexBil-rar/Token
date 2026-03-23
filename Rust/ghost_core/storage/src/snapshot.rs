@@ -16,6 +16,8 @@ struct SnapshotData {
     wallet: HashMap<String, String>,
     #[serde(default)]
     stakes: HashMap<String, StakeSnapshot>,
+    #[serde(default)]
+    network_start: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -30,7 +32,7 @@ impl From<&NodeStake> for StakeSnapshot {
     fn from(s: &NodeStake) -> Self {
         StakeSnapshot {
             amount: s.amount,
-            original_amount: s.amount,
+            original_amount: s.amount, 
             active: s.active,
             violations: s.violations,
         }
@@ -40,7 +42,7 @@ impl From<&NodeStake> for StakeSnapshot {
 impl From<StakeSnapshot> for NodeStake {
     fn from(s: StakeSnapshot) -> Self {
         NodeStake {
-            address: String::new(),
+            address: String::new(), 
             amount: s.amount,
             active: s.active,
             violations: s.violations,
@@ -84,6 +86,17 @@ impl SnapshotStorage {
         wallet_data: Option<HashMap<String, String>>,
         stakes: &HashMap<String, NodeStake>,
     ) -> Result<(), String> {
+        self.save_full(dag, state, wallet_data, stakes, None)
+    }
+
+    pub fn save_full(
+        &self,
+        dag: &DAG,
+        state: &LedgerState,
+        wallet_data: Option<HashMap<String, String>>,
+        stakes: &HashMap<String, NodeStake>,
+        network_start: Option<f64>,
+    ) -> Result<(), String> {
         let stakes_snap: HashMap<String, StakeSnapshot> = stakes.iter()
             .map(|(addr, s)| (addr.clone(), StakeSnapshot::from(s)))
             .collect();
@@ -97,6 +110,7 @@ impl SnapshotStorage {
             },
             wallet: wallet_data.unwrap_or_default(),
             stakes: stakes_snap,
+            network_start,
         };
 
         let json = serde_json::to_string_pretty(&data)
@@ -116,14 +130,14 @@ impl SnapshotStorage {
         dag: &mut DAG,
         state: &mut LedgerState,
     ) -> Result<Option<HashMap<String, String>>, String> {
-        self.load_with_stakes(dag, state).map(|opt| opt.map(|(w, _)| w))
+        self.load_with_stakes(dag, state).map(|opt| opt.map(|(w, _, _)| w))
     }
 
     pub fn load_with_stakes(
         &self,
         dag: &mut DAG,
         state: &mut LedgerState,
-    ) -> Result<Option<(HashMap<String, String>, HashMap<String, NodeStake>)>, String> {
+    ) -> Result<Option<(HashMap<String, String>, HashMap<String, NodeStake>, Option<f64>)>, String> {
         if !self.path.exists() {
             return Ok(None);
         }
@@ -152,7 +166,7 @@ impl SnapshotStorage {
             })
             .collect();
 
-        Ok(Some((data.wallet, stakes)))
+        Ok(Some((data.wallet, stakes, data.network_start)))
     }
 
     pub fn exists(&self) -> bool {
@@ -302,7 +316,7 @@ use ledger::node::NodeStake;
 
         let mut dag2 = DAG::new();
         let mut state2 = LedgerState::new();
-        let (_, loaded_stakes) = storage.load_with_stakes(&mut dag2, &mut state2)
+        let (_, loaded_stakes, _) = storage.load_with_stakes(&mut dag2, &mut state2)
             .unwrap().unwrap();
 
         assert_eq!(loaded_stakes.len(), 2);
@@ -326,7 +340,7 @@ use ledger::node::NodeStake;
 
         let mut dag2 = DAG::new();
         let mut state2 = LedgerState::new();
-        let (_, loaded_stakes) = storage.load_with_stakes(&mut dag2, &mut state2)
+        let (_, loaded_stakes, _) = storage.load_with_stakes(&mut dag2, &mut state2)
             .unwrap().unwrap();
 
         assert!(loaded_stakes.is_empty());
@@ -345,6 +359,65 @@ use ledger::node::NodeStake;
         let tmp = path.with_extension("tmp");
         assert!(!tmp.exists(), ".tmp file should not exist after successful save");
         assert!(path.exists(), "snapshot file should exist");
+
+        storage.delete();
+    }
+
+    #[test]
+    fn test_network_start_roundtrip() {
+        let path = tmp_path();
+        let storage = SnapshotStorage::new(&path);
+        let dag = DAG::new();
+        let state = LedgerState::new();
+        let network_start = 1_700_000_000.0f64;
+
+        storage.save_full(&dag, &state, None, &HashMap::new(), Some(network_start)).unwrap();
+
+        let mut dag2 = DAG::new();
+        let mut state2 = LedgerState::new();
+        let (_, _, loaded_ns) = storage.load_with_stakes(&mut dag2, &mut state2)
+            .unwrap().unwrap();
+
+        assert_eq!(loaded_ns, Some(network_start));
+        storage.delete();
+    }
+
+    #[test]
+    fn test_network_start_none_when_not_set() {
+        let path = tmp_path();
+        let storage = SnapshotStorage::new(&path);
+        let dag = DAG::new();
+        let state = LedgerState::new();
+
+        storage.save(&dag, &state, None).unwrap();
+
+        let mut dag2 = DAG::new();
+        let mut state2 = LedgerState::new();
+        let (_, _, loaded_ns) = storage.load_with_stakes(&mut dag2, &mut state2)
+            .unwrap().unwrap();
+
+        assert_eq!(loaded_ns, None);
+        storage.delete();
+    }
+
+    #[test]
+    fn test_network_start_preserved_after_stakes_update() {
+        let path = tmp_path();
+        let storage = SnapshotStorage::new(&path);
+        let dag = DAG::new();
+        let state = LedgerState::new();
+        let network_start = 1_700_000_000.0f64;
+
+        storage.save_full(&dag, &state, None, &HashMap::new(), Some(network_start)).unwrap();
+
+        let stakes = HashMap::new();
+        storage.save_with_stakes(&dag, &state, None, &stakes).unwrap();
+
+        let mut dag2 = DAG::new();
+        let mut state2 = LedgerState::new();
+        let (_, _, loaded_ns) = storage.load_with_stakes(&mut dag2, &mut state2)
+            .unwrap().unwrap();
+        assert_eq!(loaded_ns, None);
 
         storage.delete();
     }

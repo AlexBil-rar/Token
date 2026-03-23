@@ -28,10 +28,14 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     let loaded = storage.load_with_stakes(&mut node.dag, &mut node.state)
         .map_err(|e| format!("snapshot load error: {}", e))?;
 
-    if let Some((wallet_data, saved_stakes)) = loaded {
+    if let Some((wallet_data, saved_stakes, saved_network_start)) = loaded {
         node.stakes = saved_stakes;
         if !node.stakes.is_empty() {
             info!("Restored {} validator stakes from snapshot", node.stakes.len());
+        }
+        if let Some(ns) = saved_network_start {
+            node.network_start = ns;
+            info!("Restored network_start: {}", ns);
         }
         info!("Resumed from snapshot — {} transactions in DAG", node.dag.vertices.len());
         if let Some(addr) = wallet_data.get("address") {
@@ -52,7 +56,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                     node.bootstrap_genesis(addr, 10_000_000);
                     let mut wallet_data = std::collections::HashMap::new();
                     wallet_data.insert("address".to_string(), addr.clone());
-                    storage.save(&node.dag, &node.state, Some(wallet_data))
+                    storage.save_full(&node.dag, &node.state, Some(wallet_data),
+                        &node.stakes, Some(node.network_start))
                         .map_err(|e| format!("failed to save genesis: {}", e))?;
                     info!("Genesis snapshot saved to {}", cli.snapshot_path());
                     if let Some(root) = &node.last_state_root {
@@ -137,7 +142,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                 .map(|r| &r[..16.min(r.len())])
                 .unwrap_or("none")
                 .to_string();
-            match snapshot_storage.save_with_stakes(&n.dag, &n.state, None, &n.stakes) {
+            match snapshot_storage.save_full(&n.dag, &n.state, None, &n.stakes, Some(n.network_start)) {
                 Ok(_) => info!("Auto-snapshot saved (root: {}...)", root_short),
                 Err(e) => warn!("Auto-snapshot failed: {}", e),
             }
@@ -161,7 +166,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     {
         let mut n = node.lock().await;
         n.update_state_root();
-        match storage.save_with_stakes(&n.dag, &n.state, None, &n.stakes) {
+        match storage.save_full(&n.dag, &n.state, None, &n.stakes, Some(n.network_start)) {
             Ok(_) => info!("Final snapshot saved"),
             Err(e) => warn!("Failed to save final snapshot: {}", e),
         }

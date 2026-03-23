@@ -63,7 +63,6 @@ impl WsClient {
             let (mut ws, _): (WsStream, _) = connect_async(&url_str).await.ok()?;
             ws.send(Message::Text(msg.to_json())).await.ok()?;
             let raw = ws.next().await?.ok()?;
-            let _ = ws.close(None).await;  // ← ЭТА СТРОКА
             if let Message::Text(text) = raw {
                 let response = WsMessage::from_json(&text).ok()?;
                 if response.msg_type == MessageType::StateResponse {
@@ -73,6 +72,28 @@ impl WsClient {
             None
         }).await {
             Ok(Some(state)) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub async fn fetch_checkpoint(&self, peer_url: &str) -> Option<serde_json::Value> {
+        let msg = WsMessage::checkpoint_request();
+        let url_str = peer_url.to_string();
+        let timeout = self.timeout;
+        match tokio::time::timeout(timeout, async move {
+            let (mut ws, _): (WsStream, _) = connect_async(&url_str).await.ok()?;
+            ws.send(Message::Text(msg.to_json())).await.ok()?;
+            let raw = ws.next().await?.ok()?;
+            let _ = ws.close(None).await;
+            if let Message::Text(text) = raw {
+                let response = WsMessage::from_json(&text).ok()?;
+                if response.msg_type == MessageType::CheckpointResponse {
+                    return Some(response.payload);
+                }
+            }
+            None
+        }).await {
+            Ok(Some(cp)) => Some(cp),
             _ => None,
         }
     }
@@ -140,5 +161,12 @@ mod tests {
         );
         let results = client.broadcast(&[], &tx).await;
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_checkpoint_unreachable_returns_none() {
+        let client = WsClient::with_timeout(1);
+        let result = client.fetch_checkpoint("ws://127.0.0.1:19999").await;
+        assert!(result.is_none());
     }
 }

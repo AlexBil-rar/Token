@@ -13,6 +13,81 @@ use crate::merkle::{MerkleTree, StateCheckpoint};
 use crate::checkpoint::{CheckpointVertex, CheckpointRegistry};
 use crate::privacy::{DecoyPool, DiffusionConfig, ParentSelectionConfig, select_parents_with_privacy};
 
+const RESOLVE_MIN_WEIGHT: u64 = 3;
+
+#[derive(Debug, Default)]
+pub struct ConflictResolverState {
+    pub conflict_sets: std::collections::HashMap<(String, u64), Vec<String>>,
+    pub resolved: std::collections::HashMap<(String, u64), String>,
+}
+
+impl ConflictResolverState {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn register(&mut self, sender: &str, nonce: u64, tx_id: &str) {
+        self.conflict_sets
+            .entry((sender.to_string(), nonce))
+            .or_default()
+            .push(tx_id.to_string());
+    }
+
+    pub fn resolve_ready(
+        &mut self,
+        dag: &mut crate::dag::DAG,
+        stake_weights: &HashMap<String, f64>,
+        total_stake: f64,
+    ) -> Vec<(String, String)> {
+        let ready: Vec<(String, u64)> = self.conflict_sets.iter()
+            .filter(|(key, ids)| {
+                !self.resolved.contains_key(*key) && ids.len() > 1 &&
+                ids.iter().all(|id| {
+                    dag.get_transaction(id)
+                        .map(|t| t.weight >= RESOLVE_MIN_WEIGHT)
+                        .unwrap_or(false)
+                })
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        let mut losers = Vec::new();
+
+        for key in ready {
+            let ids = match self.conflict_sets.get(&key) { Some(v) => v.clone(), None => continue };
+
+            let scores: Vec<(String, f64)> = ids.iter().filter_map(|id| {
+                let tx = dag.get_transaction(id)?;
+                let stake = stake_weights.get(&tx.sender).copied().unwrap_or(0.0);
+                let ratio = if total_stake > 0.0 { (stake / total_stake).clamp(0.0, 1.0) } else { 0.0 };
+                let multiplier = 1.0 + ratio * 2.0;
+                Some((id.clone(), tx.weight as f64 * multiplier))
+            }).collect();
+
+            if scores.is_empty() { continue; }
+
+            let winner = scores.iter()
+                .max_by(|(id_a, sa), (id_b, sb)| {
+                    sa.partial_cmp(sb).unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| id_b.cmp(id_a))
+                })
+                .map(|(id, _)| id.clone());
+
+            if let Some(winner_id) = winner {
+                for id in &ids {
+                    if id != &winner_id {
+                        if let Some(t) = dag.get_transaction_mut(id) {
+                            t.status = crate::transaction::TxStatus::Conflict;
+                            losers.push((id.clone(), t.sender.clone()));
+                        }
+                    }
+                }
+                self.resolved.insert(key, winner_id);
+            }
+        }
+
+        losers
+    }
+}
+
 pub struct WalletInfo {
     pub address: String,
     pub public_key: String,
@@ -55,9 +130,11 @@ pub struct Node {
     pub pruner: Pruner,
     pub anti_spam: AntiSpamController,
     pub stakes: HashMap<String, NodeStake>,
+    pub network_start: f64,
     pub last_state_root: Option<String>,
     pub checkpoint_height: u64,
     pub checkpoint_registry: CheckpointRegistry,
+    pub conflict_resolver: ConflictResolverState,
     pub decoy_pool: DecoyPool,
     pub diffusion: DiffusionConfig,
 }
@@ -72,9 +149,14 @@ impl Node {
             pruner: Pruner::default(),
             anti_spam: AntiSpamController::new(),
             stakes: HashMap::new(),
+            network_start: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64(),
             last_state_root: None,
             checkpoint_height: 0,
             checkpoint_registry: CheckpointRegistry::new(),
+            conflict_resolver: ConflictResolverState::new(),
             decoy_pool: DecoyPool::new(50),
             diffusion: DiffusionConfig::default(),
         }
@@ -301,13 +383,27 @@ impl Node {
         self.anti_spam.record_transaction();
         self.decoy_pool.record(tx_id.clone());
 
+        {
+            let sender = self.dag.get_transaction(&tx_id)
+                .map(|t| (t.sender.clone(), t.nonce))
+                .unwrap_or_default();
+            if !sender.0.is_empty() {
+                self.conflict_resolver.register(&sender.0, sender.1, &tx_id);
+            }
+            let stake_weights = self.stake_weights();
+            let total_stake = self.total_stake();
+            let _losers = self.conflict_resolver.resolve_ready(
+                &mut self.dag, &stake_weights, total_stake,
+            );
+        }
+
         let total = self.dag.vertices.len() as u64;
         if total % 100 == 0 {
             self.update_state_root();
         }
 
         if let Some(cp_id) = self.maybe_create_dag_checkpoint() {
-            let _ = cp_id;
+            let _ = cp_id; 
         }
 
         if self.pruner.should_prune_default(&self.dag) {
@@ -467,6 +563,7 @@ mod tests {
         let weights = node.stake_weights();
         assert!(!weights.contains_key("alice"));
     }
+
 
     #[test]
     fn test_update_state_root_after_genesis() {
