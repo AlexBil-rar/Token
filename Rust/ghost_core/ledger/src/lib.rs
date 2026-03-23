@@ -6,3 +6,5 @@ pub mod validator;
 pub mod node;
 pub mod pruner;
 pub mod anti_spam;
+pub mod merkle;
+pub mod batch;

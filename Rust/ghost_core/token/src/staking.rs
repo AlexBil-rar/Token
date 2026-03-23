@@ -3,10 +3,14 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MIN_STAKE: u64 = 1_000;
+pub const MIN_STAKE: u64 = 1_000;
 const SLASH_PERCENT: f64 = 0.10;
 const SLASH_BURN_RATIO: f64 = 0.50;
 const MAX_VIOLATIONS: usize = 3;
+
+pub const MIN_VALIDATOR_STAKE: u64 = MIN_STAKE;
+
+pub const MIN_REWARD_STAKE: u64 = MIN_STAKE / 2;
 
 fn now_secs() -> f64 {
     SystemTime::now()
@@ -34,10 +38,10 @@ pub enum ViolationType {
 impl ViolationType {
     pub fn as_str(&self) -> &str {
         match self {
-            ViolationType::DoubleVote => "double_vote",
-            ViolationType::ConflictingTx => "conflicting_tx",
+            ViolationType::DoubleVote       => "double_vote",
+            ViolationType::ConflictingTx    => "conflicting_tx",
             ViolationType::ReputationPenalty => "reputation_penalty",
-            ViolationType::InvalidState => "invalid_state",
+            ViolationType::InvalidState     => "invalid_state",
         }
     }
 }
@@ -66,6 +70,14 @@ impl StakeRecord {
         if self.original_amount == 0 { return 0.0; }
         self.amount as f64 / self.original_amount as f64
     }
+
+    pub fn is_validator(&self) -> bool {
+        self.is_active() && self.amount >= MIN_VALIDATOR_STAKE
+    }
+
+    pub fn is_reward_eligible(&self) -> bool {
+        self.is_active() && self.amount >= MIN_REWARD_STAKE
+    }
 }
 
 #[derive(Debug)]
@@ -75,6 +87,14 @@ pub struct SlashResult {
     pub to_pool: u64,
     pub ejected: bool,
     pub reason: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum EligibilityStatus {
+    Validator,
+    RewardOnly,
+    RelayOnly,
+    Ejected,
 }
 
 #[derive(Debug, Default)]
@@ -155,7 +175,6 @@ impl StakingManager {
             let remaining = record.amount;
             let burned_remaining = (remaining as f64 * SLASH_BURN_RATIO) as u64;
             let pool_remaining = remaining - burned_remaining;
-
             self.total_burned += burned_remaining;
             self.slash_pool += pool_remaining;
             record.amount = 0;
@@ -165,13 +184,7 @@ impl StakingManager {
             record.status = StakeStatus::Active;
         }
 
-        Some(SlashResult {
-            slashed_amount: slash_amount,
-            burned,
-            to_pool,
-            ejected,
-            reason: violation.as_str().to_string(),
-        })
+        Some(SlashResult { slashed_amount: slash_amount, burned, to_pool, ejected, reason: violation.as_str().to_string() })
     }
 
     pub fn withdraw(
@@ -193,19 +206,56 @@ impl StakingManager {
         *balances.entry(address.to_string()).or_insert(0) += amount;
         record.amount = 0;
         record.status = StakeStatus::Withdrawn;
-
         Ok(amount)
     }
 
-    pub fn is_eligible(&self, address: &str) -> bool {
-        self.stakes.get(address)
-            .map(|r| r.is_active() && r.amount >= MIN_STAKE)
-            .unwrap_or(false)
+    pub fn eligibility(&self, address: &str) -> EligibilityStatus {
+        match self.stakes.get(address) {
+            None => EligibilityStatus::RelayOnly,
+            Some(r) => match r.status {
+                StakeStatus::Ejected => EligibilityStatus::Ejected,
+                StakeStatus::Withdrawn => EligibilityStatus::RelayOnly,
+                _ if r.amount >= MIN_VALIDATOR_STAKE && r.is_active() => {
+                    EligibilityStatus::Validator
+                }
+                _ if r.amount >= MIN_REWARD_STAKE && r.is_active() => {
+                    EligibilityStatus::RewardOnly
+                }
+                _ => EligibilityStatus::RelayOnly,
+            }
+        }
     }
 
-    pub fn get_stake_weight(&self, address: &str) -> f64 {
-        if !self.is_eligible(address) { return 0.0; }
-        self.stakes[address].stake_ratio()
+    pub fn is_eligible(&self, address: &str) -> bool {
+        self.eligibility(address) == EligibilityStatus::Validator
+    }
+
+    pub fn is_reward_eligible(&self, address: &str) -> bool {
+        matches!(
+            self.eligibility(address),
+            EligibilityStatus::Validator | EligibilityStatus::RewardOnly
+        )
+    }
+
+    pub fn get_stake_amount(&self, address: &str) -> f64 {
+        self.stakes.get(address)
+            .filter(|r| r.is_active())
+            .map(|r| r.amount as f64)
+            .unwrap_or(0.0)
+    }
+
+    pub fn total_stake(&self) -> f64 {
+        self.stakes.values()
+            .filter(|r| r.is_active())
+            .map(|r| r.amount as f64)
+            .sum()
+    }
+
+    pub fn active_validators(&self) -> HashMap<String, f64> {
+        self.stakes.values()
+            .filter(|r| r.is_validator())
+            .map(|r| (r.address.clone(), r.amount as f64))
+            .collect()
     }
 
     pub fn distribute_slash_pool(
@@ -317,13 +367,10 @@ mod tests {
         balances.insert("node1".to_string(), 5000u64);
         balances.insert("node2".to_string(), 5000u64);
         balances.insert("bad".to_string(), 5000u64);
-
         manager.stake("node1", MIN_STAKE, &mut balances).unwrap();
         manager.stake("node2", MIN_STAKE, &mut balances).unwrap();
         manager.stake("bad", MIN_STAKE, &mut balances).unwrap();
-
         manager.slash("bad", ViolationType::DoubleVote, "");
-
         let b1_before = balances["node1"];
         let distributed = manager.distribute_slash_pool(&mut balances);
         assert!(distributed > 0);
@@ -331,11 +378,88 @@ mod tests {
     }
 
     #[test]
-    fn test_is_eligible() {
+    fn test_is_eligible_requires_min_stake() {
         let mut manager = StakingManager::new();
         let mut balances = make_balances("node1", 5000);
         assert!(!manager.is_eligible("node1"));
         manager.stake("node1", MIN_STAKE, &mut balances).unwrap();
         assert!(manager.is_eligible("node1"));
+    }
+
+    #[test]
+    fn test_no_stake_is_relay_only() {
+        let manager = StakingManager::new();
+        assert_eq!(manager.eligibility("unknown"), EligibilityStatus::RelayOnly);
+    }
+
+    #[test]
+    fn test_full_stake_is_validator() {
+        let mut manager = StakingManager::new();
+        let mut balances = make_balances("node1", 5000);
+        manager.stake("node1", MIN_VALIDATOR_STAKE, &mut balances).unwrap();
+        assert_eq!(manager.eligibility("node1"), EligibilityStatus::Validator);
+    }
+
+    #[test]
+    fn test_ejected_node_is_ejected() {
+        let mut manager = StakingManager::new();
+        let mut balances = make_balances("node1", 10000);
+        manager.stake("node1", MIN_STAKE, &mut balances).unwrap();
+        for _ in 0..MAX_VIOLATIONS {
+            manager.slash("node1", ViolationType::DoubleVote, "");
+        }
+        assert_eq!(manager.eligibility("node1"), EligibilityStatus::Ejected);
+    }
+
+    #[test]
+    fn test_is_reward_eligible_with_validator_stake() {
+        let mut manager = StakingManager::new();
+        let mut balances = make_balances("node1", 5000);
+        manager.stake("node1", MIN_STAKE, &mut balances).unwrap();
+        assert!(manager.is_reward_eligible("node1"));
+    }
+
+    #[test]
+    fn test_ejected_not_reward_eligible() {
+        let mut manager = StakingManager::new();
+        let mut balances = make_balances("node1", 10000);
+        manager.stake("node1", MIN_STAKE, &mut balances).unwrap();
+        for _ in 0..MAX_VIOLATIONS {
+            manager.slash("node1", ViolationType::DoubleVote, "");
+        }
+        assert!(!manager.is_reward_eligible("node1"));
+    }
+
+    #[test]
+    fn test_total_stake_sums_active() {
+        let mut manager = StakingManager::new();
+        let mut balances = HashMap::new();
+        balances.insert("a".to_string(), 5000u64);
+        balances.insert("b".to_string(), 5000u64);
+        manager.stake("a", MIN_STAKE, &mut balances).unwrap();
+        manager.stake("b", MIN_STAKE, &mut balances).unwrap();
+        assert_eq!(manager.total_stake(), (MIN_STAKE * 2) as f64);
+    }
+
+    #[test]
+    fn test_get_stake_amount_inactive_is_zero() {
+        let manager = StakingManager::new();
+        assert_eq!(manager.get_stake_amount("nobody"), 0.0);
+    }
+
+    #[test]
+    fn test_active_validators_excludes_slashed() {
+        let mut manager = StakingManager::new();
+        let mut balances = HashMap::new();
+        balances.insert("good".to_string(), 5000u64);
+        balances.insert("bad".to_string(), 10000u64);
+        manager.stake("good", MIN_STAKE, &mut balances).unwrap();
+        manager.stake("bad", MIN_STAKE, &mut balances).unwrap();
+        for _ in 0..MAX_VIOLATIONS {
+            manager.slash("bad", ViolationType::DoubleVote, "");
+        }
+        let validators = manager.active_validators();
+        assert!(validators.contains_key("good"));
+        assert!(!validators.contains_key("bad"));
     }
 }
