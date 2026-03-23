@@ -171,24 +171,8 @@ impl Validator {
         dag: &DAG,
         state: &mut LedgerState,
     ) -> ValidationResult {
-        let checks: Vec<ValidationResult> = vec![
-            self.validate_structure(tx),
-            self.validate_duplicate(tx, dag),
-            self.validate_parents(tx, dag),
-            self.validate_signature(tx),
-            self.validate_anti_spam(tx),
-            self.validate_state(tx, state),
-        ];
-
-        for result in checks {
-            if !result.ok {
-                return result;
-            }
-        }
-
-        ValidationResult::ok("ok", "transaction valid")
+        self.validate_full_with_difficulty(tx, dag, state, ANTI_SPAM_DIFFICULTY)
     }
-
     pub fn validate_full_with_difficulty(
         &self,
         tx: &TransactionVertex,

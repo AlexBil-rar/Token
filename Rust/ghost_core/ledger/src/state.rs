@@ -63,9 +63,15 @@ impl LedgerState {
     pub fn apply_transaction(&mut self, tx: &TransactionVertex) -> Result<(), String> {
         self.can_apply(tx)?;
     
-        *self.balances.get_mut(&tx.sender).unwrap() -= tx.amount;
-        *self.balances.get_mut(&tx.receiver).unwrap() += tx.amount;
-        *self.nonces.get_mut(&tx.sender).unwrap() = tx.nonce;
+        if let Some(b) = self.balances.get_mut(&tx.sender) {
+            *b = b.saturating_sub(tx.amount);
+        }
+        if let Some(b) = self.balances.get_mut(&tx.receiver) {
+            *b = b.saturating_add(tx.amount);
+        }
+        if let Some(n) = self.nonces.get_mut(&tx.sender) {
+            *n = tx.nonce;
+        }
         self.applied_txs.insert(tx.tx_id.clone());
     
         Ok(())

@@ -8,6 +8,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+#[allow(dead_code)]
 pub fn stable_json_bytes(value: &serde_json::Value) -> Vec<u8> {
     value.to_string().into_bytes()
 }
