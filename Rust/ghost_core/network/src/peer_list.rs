@@ -6,6 +6,7 @@ use std::collections::HashSet;
 pub struct PeerList {
     peers: HashSet<String>,
 }
+const MAX_PEERS: usize = 128;
 
 impl PeerList {
     pub fn new() -> Self {
@@ -13,6 +14,9 @@ impl PeerList {
     }
 
     pub fn add(&mut self, address: &str) {
+        if self.peers.len() >= MAX_PEERS {
+            return;
+        }
         self.peers.insert(address.trim_end_matches('/').to_string());
     }
 

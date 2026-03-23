@@ -27,7 +27,7 @@ impl LedgerState {
 
     pub fn get_nonce(&mut self, address: &str) -> u64 {
         self.ensure_account(address);
-        *self.nonces.get(address).unwrap()
+        *self.nonces.get(address).unwrap_or(&0)
     }
 
     pub fn credit(&mut self, address: &str, amount: u64) {
@@ -52,7 +52,7 @@ impl LedgerState {
             return Err(format!("insufficient balance: have {}, need {}", balance, tx.amount));
         }
 
-        let expected_nonce = self.nonces.get(&tx.sender).unwrap() + 1;
+        let expected_nonce = self.nonces.get(&tx.sender).copied().unwrap_or(0) + 1;
         if tx.nonce != expected_nonce {
             return Err(format!("invalid nonce: expected {}, got {}", expected_nonce, tx.nonce));
         }
@@ -62,12 +62,12 @@ impl LedgerState {
 
     pub fn apply_transaction(&mut self, tx: &TransactionVertex) -> Result<(), String> {
         self.can_apply(tx)?;
-
+    
         *self.balances.get_mut(&tx.sender).unwrap() -= tx.amount;
         *self.balances.get_mut(&tx.receiver).unwrap() += tx.amount;
         *self.nonces.get_mut(&tx.sender).unwrap() = tx.nonce;
         self.applied_txs.insert(tx.tx_id.clone());
-
+    
         Ok(())
     }
 }

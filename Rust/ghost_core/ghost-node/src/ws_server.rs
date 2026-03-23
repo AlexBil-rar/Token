@@ -67,6 +67,10 @@ async fn handle_connection(
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
+                if text.len() > 1_048_576 {
+                    warn!("Oversized message from {}: {} bytes", peer_addr, text.len());
+                    break;
+                }
                 let response = handle_message(&text, &node, &peers).await;
                 if let Some(resp) = response {
                     if let Err(e) = sender.send(Message::Text(resp)).await {
