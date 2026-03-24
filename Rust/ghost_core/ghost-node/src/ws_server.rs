@@ -233,9 +233,15 @@ async fn handle_transaction(
 
 async fn handle_state_request(node: &SharedNode) -> Option<String> {
     let n = node.lock().await;
+    let state_root = n.last_state_root.clone().unwrap_or_default();
+    let cp_seq = n.checkpoint_registry.latest_finalized()
+        .map(|cp| cp.sequence)
+        .unwrap_or(0);
     let resp = WsMessage::new(MessageType::StateResponse, serde_json::json!({
-        "balances": n.state.balances,
-        "nonces":   n.state.nonces,
+        "balances":   n.state.balances,
+        "nonces":     n.state.nonces,
+        "state_root": state_root,
+        "cp_seq":     cp_seq,
     }));
     Some(resp.to_json())
 }

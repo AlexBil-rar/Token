@@ -335,6 +335,27 @@ impl Node {
         tx
     }
 
+    pub fn verify_synced_state(
+        &self,
+        state: &LedgerState,
+    ) -> Result<(), String> {
+        let trusted_root = match self.checkpoint_registry.latest_trusted_root() {
+            Some(r) => r,
+            None => return Ok(()), 
+        };
+    
+        let state_map: HashMap<String, (u64, u64)> = state.balances
+            .iter()
+            .map(|(addr, bal)| {
+                let nonce = state.nonces.get(addr).copied().unwrap_or(0);
+                (addr.clone(), (*bal, nonce))
+            })
+            .collect();
+    
+        MerkleTree::verify(&state_map, trusted_root)
+            .map_err(|e| format!("sync state root mismatch: {}", e))
+    }
+
     pub fn submit_transaction(&mut self, tx: TransactionVertex) -> ValidationResult {
         match self.anti_spam.check_and_record_address(&tx.sender) {
             RateLimitResult::Rejected { reason } => {

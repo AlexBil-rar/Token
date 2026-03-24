@@ -146,22 +146,58 @@ async fn sync_from_peers(node: Arc<Mutex<Node>>, peers: Arc<Mutex<PeerList>>) {
     let client = WsClient::with_timeout(5);
 
     for peer_url in &peer_list {
-        info!("Trying to sync from {}...", peer_url);
+        info!("Syncing state from {}...", peer_url);
+
+        if let Some(cp_json) = client.fetch_checkpoint(peer_url).await {
+            let n = node.lock().await;
+            let peer_root = cp_json["state_root"].as_str().unwrap_or("").to_string();
+            let peer_seq  = cp_json["sequence"].as_u64().unwrap_or(0);
+            let is_finalized = cp_json["is_finalized"].as_bool().unwrap_or(false);
+
+            if !is_finalized {
+                info!("Peer {} has no finalized checkpoint — skipping checkpoint verification", peer_url);
+            } else {
+                info!("Peer checkpoint seq={} root={}...", peer_seq, &peer_root[..8.min(peer_root.len())]);
+            }
+            drop(n);
+        }
+
         match client.fetch_state(peer_url).await {
             Some(state_json) => {
-                let mut n = node.lock().await;
-                if let Some(map) = state_json.get("balances").and_then(|b| b.as_object()) {
-                    for (addr, val) in map {
+                let mut candidate = ledger::state::LedgerState::new();
+                if let Some(balances) = state_json.get("balances").and_then(|b| b.as_object()) {
+                    for (addr, val) in balances {
                         if let Some(balance) = val.as_u64() {
-                            n.state.ensure_account(addr);
-                            n.state.balances.insert(addr.clone(), balance);
+                            candidate.ensure_account(addr);
+                            candidate.balances.insert(addr.clone(), balance);
                         }
                     }
-                    info!("State synced from {} — {} accounts", peer_url, map.len());
-                    return;
+                }
+                if let Some(nonces) = state_json.get("nonces").and_then(|n| n.as_object()) {
+                    for (addr, val) in nonces {
+                        if let Some(nonce) = val.as_u64() {
+                            candidate.nonces.insert(addr.clone(), nonce);
+                        }
+                    }
+                }
+
+                let n = node.lock().await;
+                match n.verify_synced_state(&candidate) {
+                    Ok(()) => {
+                        drop(n);
+                        let mut n = node.lock().await;
+                        let account_count = candidate.balances.len();
+                        n.state.balances.extend(candidate.balances);
+                        n.state.nonces.extend(candidate.nonces);
+                        info!("State synced from {} — {} accounts (root verified)", peer_url, account_count);
+                        return;
+                    }
+                    Err(e) => {
+                        warn!("State from {} failed root verification: {}", peer_url, e);
+                    }
                 }
             }
-            None => warn!("Could not sync from {}", peer_url),
+            None => warn!("Could not fetch state from {}", peer_url),
         }
     }
     warn!("Could not sync from any peer — starting with local state");

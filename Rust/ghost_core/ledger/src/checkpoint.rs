@@ -134,6 +134,50 @@ impl CheckpointRegistry {
         None
     }
 
+    pub fn verify_chain(&self) -> Result<usize, String> {
+        let ordered = self.all_ordered();
+        let finalized: Vec<&CheckpointVertex> = ordered.iter()
+            .filter(|cp| cp.is_finalized())
+            .copied()
+            .collect();
+    
+        if finalized.is_empty() {
+            return Ok(0);
+        }
+    
+        for cp in &finalized {
+            if cp.state_root.is_empty() {
+                return Err(format!(
+                    "checkpoint {} (seq {}) has empty state_root",
+                    &cp.checkpoint_id[..8], cp.sequence
+                ));
+            }
+        }
+    
+        for window in finalized.windows(2) {
+            let (prev, next) = (window[0], window[1]);
+            if next.sequence <= prev.sequence {
+                return Err(format!(
+                    "sequence not monotonic: {} → {}",
+                    prev.sequence, next.sequence
+                ));
+            }
+            if next.dag_height <= prev.dag_height {
+                return Err(format!(
+                    "dag_height not monotonic at seq {}: {} → {}",
+                    next.sequence, prev.dag_height, next.dag_height
+                ));
+            }
+        }
+    
+        Ok(finalized.len())
+    }
+    
+    pub fn latest_trusted_root(&self) -> Option<&str> {
+        self.latest_finalized()
+            .map(|cp| cp.state_root.as_str())
+    }
+
     pub fn latest(&self) -> Option<&CheckpointVertex> {
         self.by_sequence
             .iter()
@@ -334,5 +378,56 @@ mod tests {
     fn test_checkpoint_id_length() {
         let cp = make_checkpoint(1, "some_root", 500);
         assert_eq!(cp.checkpoint_id.len(), 64);
+    }
+
+
+    #[test]
+    fn test_verify_chain_empty() {
+        let reg = CheckpointRegistry::new();
+        assert_eq!(reg.verify_chain().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_verify_chain_single_finalized() {
+        let mut reg = CheckpointRegistry::new();
+        let mut cp = CheckpointVertex::new("root_abc".into(), 1, 500, 2, "node".into(), vec![]);
+        cp.weight = CHECKPOINT_MIN_WEIGHT;
+        reg.register(cp);
+        assert_eq!(reg.verify_chain().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_verify_chain_monotonic() {
+        let mut reg = CheckpointRegistry::new();
+        for (seq, dag_h, root) in [(1u64, 500u64, "r1"), (2, 1000, "r2"), (3, 1500, "r3")] {
+            let mut cp = CheckpointVertex::new(root.into(), seq, dag_h, 2, "node".into(), vec![]);
+            cp.weight = CHECKPOINT_MIN_WEIGHT;
+            reg.register(cp);
+        }
+        assert_eq!(reg.verify_chain().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_verify_chain_empty_root_fails() {
+        let mut reg = CheckpointRegistry::new();
+        let mut cp = CheckpointVertex::new("".into(), 1, 500, 2, "node".into(), vec![]);
+        cp.weight = CHECKPOINT_MIN_WEIGHT;
+        reg.register(cp);
+        assert!(reg.verify_chain().is_err());
+    }
+
+    #[test]
+    fn test_latest_trusted_root_none_when_empty() {
+        let reg = CheckpointRegistry::new();
+        assert!(reg.latest_trusted_root().is_none());
+    }
+
+    #[test]
+    fn test_latest_trusted_root_returns_finalized() {
+        let mut reg = CheckpointRegistry::new();
+        let mut cp = CheckpointVertex::new("root_xyz".into(), 1, 500, 2, "node".into(), vec![]);
+        cp.weight = CHECKPOINT_MIN_WEIGHT;
+        reg.register(cp);
+        assert_eq!(reg.latest_trusted_root(), Some("root_xyz"));
     }
 }
