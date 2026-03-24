@@ -27,10 +27,6 @@ def try_resolve(
     conflict_sets: dict[str, list[str]],
     resolved: dict[str, str],
 ) -> list[str]:
-    """
-    Try to close any open conflicts.
-    Returns list of newly resolved conflict_ids.
-    """
     newly_resolved = []
 
     for cid, ids in conflict_sets.items():
@@ -53,7 +49,6 @@ def try_resolve(
         others = [s for t, s in scores.items() if t != winner]
         second = max(others) if others else 0
 
-        # Closure rule: winner_score >= SIGMA * second (or second == 0)
         if second == 0 or winner_score >= SIGMA * second:
             resolved[cid] = winner
             newly_resolved.append(cid)

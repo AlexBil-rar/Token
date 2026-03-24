@@ -1,25 +1,9 @@
 # sim/run_simulation.py
-"""
-GhostLedger β/ε Convergence Simulator
-======================================
-
-Usage:
-    python -m sim.run_simulation                  # text table
-    python -m sim.run_simulation --plot           # + matplotlib heatmaps
-    python -m sim.run_simulation --csv out.csv    # dump to CSV
-
-What it measures:
-    median_closure   — median steps to resolve a conflict (lower = faster consensus)
-    p90_closure      — 90th percentile (tail latency)
-    closure_rate     — fraction of conflicts resolved before simulation ends (higher = better)
-    mean_dag_width   — average number of live tips (lower = less DAG sprawl)
-    decoy_rate       — actual decoy injection rate (should track ε)
-"""
-
 import random
 import argparse
 import csv
 import sys
+import types
 from dataclasses import dataclass
 
 from sim.dag import DAG, Tx
@@ -30,24 +14,18 @@ from sim.metrics import TrialMetrics
 # ── Simulation parameters ─────────────────────────────────────────────────────
 
 N_NODES         = 6
-N_TX            = 300
-CONFLICT_EVERY  = 50
-N_TRIALS        = 15
+N_TX            = 150
+CONFLICT_EVERY  = 30
+N_TRIALS        = 10
 DECOY_POOL_MAX  = 30
 
-BETA_VALUES    = [0.0, 0.5, 0.7, 1.0]
-EPSILON_VALUES = [0.0, 0.10, 0.30]
+BETA_VALUES    = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0]
+EPSILON_VALUES = [0.0, 0.05, 0.10, 0.20, 0.30]
 
 
 # ── Single trial ──────────────────────────────────────────────────────────────
 
 def run_trial(policy: Policy, seed: int) -> TrialMetrics:
-    """
-    Multi-node simulation: N_NODES nodes share one DAG (instant gossip).
-    Each step, one randomly chosen node emits a transaction using its own
-    parent selection. This creates natural DAG width because different nodes
-    independently pick different tips.
-    """
     rng = random.Random(seed)
     dag = DAG()
     metrics = TrialMetrics(beta=policy.beta, epsilon=policy.epsilon)
@@ -60,20 +38,17 @@ def run_trial(policy: Policy, seed: int) -> TrialMetrics:
     tx_counter = 0
     conflict_counter = 0
 
-    # ── Genesis ──
     genesis = Tx(tx_id="genesis", sender="system", nonce=0, parents=[], weight=1)
     dag.add(genesis)
     decoy_pool.append("genesis")
 
     for step in range(N_TX):
 
-        # ── Inject conflict: two nodes emit conflicting tx at same step ──
         if step > 10 and step % CONFLICT_EVERY == 0:
             cid = f"c{conflict_counter}"
             conflict_counter += 1
             sender = f"user_{conflict_counter}"
 
-            # Two different nodes independently pick parents for the same sender/nonce
             losers = compute_losers(dag, conflict_sets)
             parents_a, _ = select_parents(dag, losers, decoy_pool, policy, rng)
             parents_b, _ = select_parents(dag, losers, decoy_pool, policy, rng)
@@ -86,14 +61,11 @@ def run_trial(policy: Policy, seed: int) -> TrialMetrics:
             conflict_sets[cid] = [tx_a.tx_id, tx_b.tx_id]
             conflict_open_at[cid] = step
 
-        # ── N_NODES honest nodes each emit one tx this step ──
-        # All nodes select parents BEFORE adding — prevents chain collapse within step
         losers = compute_losers(dag, conflict_sets)
         node_parents = []
         node_decoys = []
 
         for node_id in range(N_NODES):
-            import types
             view = types.SimpleNamespace(
                 get_tips=lambda nid=node_id: dag.get_tips_partial(15 + nid * 2),
                 vertices=dag.vertices,
@@ -119,7 +91,6 @@ def run_trial(policy: Policy, seed: int) -> TrialMetrics:
             if len(decoy_pool) > DECOY_POOL_MAX:
                 decoy_pool.pop(0)
 
-        # ── Try resolve ──
         newly = try_resolve(dag, conflict_sets, resolved)
         for cid in newly:
             metrics.record_closure(step - conflict_open_at[cid])
@@ -247,7 +218,6 @@ def plot_heatmaps(results: list[AggResult]):
         ax.set_title(title, fontsize=10)
         plt.colorbar(im, ax=ax)
 
-        # annotate cells
         for bi in range(nb):
             for ei in range(ne):
                 ax.text(ei, bi, f"{matrix[bi][ei]:.2f}",

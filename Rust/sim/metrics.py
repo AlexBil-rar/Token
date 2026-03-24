@@ -7,15 +7,9 @@ from dataclasses import dataclass, field
 class TrialMetrics:
     beta: float
     epsilon: float
-
-    # Convergence
-    closure_times: list[int] = field(default_factory=list)   # steps to resolve each conflict
-    unresolved: int = 0                                        # conflicts not closed by end
-
-    # DAG shape
-    dag_widths: list[int] = field(default_factory=list)       # tips count over time
-
-    # Privacy
+    closure_times: list[int] = field(default_factory=list) 
+    unresolved: int = 0                                      
+    dag_widths: list[int] = field(default_factory=list)      
     decoy_injections: int = 0
     total_selections: int = 0
 

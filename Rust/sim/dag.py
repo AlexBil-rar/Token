@@ -11,7 +11,7 @@ class Tx:
     nonce: int
     parents: list[str]
     weight: int = 1
-    conflict_id: Optional[str] = None  # None = no conflict
+    conflict_id: Optional[str] = None
 
 
 class DAG:
@@ -19,7 +19,6 @@ class DAG:
         self.vertices: dict[str, Tx] = {}
         self.tips: set[str] = set()
         self.children: dict[str, set[str]] = {}
-        # insertion order — for partial view simulation
         self._order: list[str] = []
 
     def add(self, tx: Tx):
@@ -34,17 +33,12 @@ class DAG:
         return list(self.tips)
 
     def get_tips_partial(self, known_last_n: int) -> list[str]:
-        """
-        Simulate a node that knows only the last `known_last_n` transactions.
-        Tips from its partial view — creates natural DAG width across nodes.
-        """
         if known_last_n >= len(self._order):
             return self.get_tips()
 
         known = set(self._order[-known_last_n:])
-        known.add(self._order[0])  # genesis always known
+        known.add(self._order[0]) 
 
-        # tips = known tx that have no children within known set
         partial_tips = []
         for tx_id in known:
             children_in_known = self.children.get(tx_id, set()) & known
