@@ -12,6 +12,7 @@ use crate::anti_spam::{AntiSpamController, RateLimitResult};
 use crate::merkle::{MerkleTree, StateCheckpoint};
 use crate::checkpoint::{CheckpointVertex, CheckpointRegistry};
 use crate::privacy::{DecoyPool, DiffusionConfig, ParentSelectionConfig, select_parents_with_privacy};
+use token::staking::{StakingManager, EligibilityStatus};
 
 const RESOLVE_MIN_WEIGHT: u64 = 3;
 
@@ -94,34 +95,6 @@ pub struct WalletInfo {
     pub private_key_hex: String,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum StakeResult {
-    Registered { amount: u64 },
-    InsufficientBalance,
-    BelowMinimum { min: u64 },
-    AlreadyStaking,
-}
-
-#[derive(Debug, Clone)]
-pub struct NodeStake {
-    pub address: String,
-    pub amount: u64,
-    pub active: bool,
-    pub violations: u32,
-}
-
-impl NodeStake {
-    pub fn new(address: String, amount: u64) -> Self {
-        NodeStake { address, amount, active: true, violations: 0 }
-    }
-
-    pub const MIN_STAKE: u64 = 1_000;
-
-    pub fn is_validator(&self) -> bool {
-        self.active && self.amount >= Self::MIN_STAKE
-    }
-}
-
 pub struct Node {
     pub dag: DAG,
     pub state: LedgerState,
@@ -129,6 +102,7 @@ pub struct Node {
     pub validator: Validator,
     pub pruner: Pruner,
     pub anti_spam: AntiSpamController,
+    pub staking: StakingManager,
     pub stakes: HashMap<String, NodeStake>,
     pub network_start: f64,
     pub last_state_root: Option<String>,
@@ -148,7 +122,7 @@ impl Node {
             validator: Validator::new(),
             pruner: Pruner::default(),
             anti_spam: AntiSpamController::new(),
-            stakes: HashMap::new(),
+            staking: StakingManager::new(),
             network_start: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -194,35 +168,29 @@ impl Node {
         tx.mine_anti_spam(difficulty);
     }
 
-    pub fn register_stake(&mut self, address: &str, amount: u64) -> StakeResult {
-        if amount < NodeStake::MIN_STAKE {
-            return StakeResult::BelowMinimum { min: NodeStake::MIN_STAKE };
-        }
-
-        if let Some(existing) = self.stakes.get(address) {
-            if existing.active {
-                return StakeResult::AlreadyStaking;
-            }
-        }
-
-        let balance = self.state.get_balance(address);
-        if balance < amount {
-            return StakeResult::InsufficientBalance;
-        }
-
-        if let Some(b) = self.state.balances.get_mut(address) {
-            *b = b.saturating_sub(amount);
-        }
-
-        self.stakes.insert(address.to_string(), NodeStake::new(address.to_string(), amount));
-        StakeResult::Registered { amount }
+    pub fn register_stake(&mut self, address: &str, amount: u64) -> Result<(), String> {
+        self.staking.stake(address, amount, &mut self.state.balances)
+    }
+    
+    pub fn stake_weights(&self) -> HashMap<String, f64> {
+        self.staking.active_validators()
+    }
+    
+    pub fn total_stake(&self) -> f64 {
+        self.staking.total_stake()
+    }
+    
+    pub fn is_validator(&self, address: &str) -> bool {
+        self.staking.is_eligible(address)
     }
 
-    pub fn total_stake(&self) -> f64 {
-        self.stakes.values()
-            .filter(|s| s.is_validator())
-            .map(|s| s.amount as f64)
-            .sum()
+    pub fn stake_multiplier(&self, address: &str, total_stake: f64) -> f64 {
+        let stake = self.staking.get_stake_amount(address);
+        if total_stake <= 0.0 || stake <= 0.0 {
+            return 1.0;
+        }
+        let ratio = (stake / total_stake).clamp(0.0, 1.0);
+        1.0 + ratio * 2.0
     }
 
     pub fn stake_of(&self, address: &str) -> f64 {
@@ -234,19 +202,6 @@ impl Node {
 
     pub fn conflict_sets(&self) -> &std::collections::HashMap<(String, u64), Vec<String>> {
         &self.conflict_resolver.conflict_sets
-    }
-
-    pub fn stake_weights(&self) -> HashMap<String, f64> {
-        self.stakes.values()
-            .filter(|s| s.is_validator())
-            .map(|s| (s.address.clone(), s.amount as f64))
-            .collect()
-    }
-
-    pub fn is_validator(&self, address: &str) -> bool {
-        self.stakes.get(address)
-            .map(|s| s.is_validator())
-            .unwrap_or(false)
     }
 
     pub fn update_state_root(&mut self) {
@@ -503,7 +458,7 @@ mod tests {
         let mut node = Node::new();
         node.state.credit("alice", 5000);
         let result = node.register_stake("alice", 1000);
-        assert_eq!(result, StakeResult::Registered { amount: 1000 });
+        assert!(result.is_ok(), "stake should succeed: {:?}", result);
         assert!(node.is_validator("alice"));
     }
 
@@ -512,7 +467,7 @@ mod tests {
         let mut node = Node::new();
         node.state.credit("alice", 5000);
         let result = node.register_stake("alice", 100);
-        assert_eq!(result, StakeResult::BelowMinimum { min: NodeStake::MIN_STAKE });
+        assert!(result.is_err(), "stake below minimum should fail");
         assert!(!node.is_validator("alice"));
     }
 
@@ -521,7 +476,7 @@ mod tests {
         let mut node = Node::new();
         node.state.credit("alice", 500);
         let result = node.register_stake("alice", 1000);
-        assert_eq!(result, StakeResult::InsufficientBalance);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -536,9 +491,26 @@ mod tests {
     fn test_register_stake_already_staking() {
         let mut node = Node::new();
         node.state.credit("alice", 5000);
-        node.register_stake("alice", 1000);
+        node.register_stake("alice", 1000).unwrap();
         let result = node.register_stake("alice", 1000);
-        assert_eq!(result, StakeResult::AlreadyStaking);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_stake_multiplier_no_stake_is_one() {
+        let node = Node::new();
+        assert_eq!(node.stake_multiplier("nobody", 1000.0), 1.0);
+    }
+
+    #[test]
+    fn test_stake_multiplier_with_stake() {
+        let mut node = Node::new();
+        node.state.credit("alice", 5000);
+        node.register_stake("alice", 1000).unwrap();
+        let total = node.total_stake();
+        let m = node.stake_multiplier("alice", total);
+        assert!(m > 1.0, "multiplier should be > 1.0 for staked node");
+        assert!(m <= 3.0, "multiplier capped at 3.0");
     }
 
     #[test]

@@ -41,6 +41,11 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                         return Err(format!("invalid genesis address: {}", addr));
                     }
                     genesis::bootstrap(&mut node.state, addr);
+                    match node.register_stake(addr, token::staking::MIN_STAKE) {
+                        Ok(()) => info!("Genesis stake registered for {}", addr),
+                        Err(e) => warn!("Genesis stake failed (non-fatal): {}", e),
+                    }
+                
                     let mut wallet_data = std::collections::HashMap::new();
                     wallet_data.insert("address".to_string(), addr.clone());
                     storage.save(&node.dag, &node.state, Some(wallet_data))
