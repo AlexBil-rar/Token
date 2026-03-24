@@ -10,6 +10,7 @@ use ledger::node::Node;
 use network::peer_list::PeerList;
 use network::ws_client::WsClient;
 use storage::snapshot::SnapshotStorage;
+use consensus::conflict_resolver::ConflictResolver;
 
 use crate::cli::Cli;
 use crate::genesis;
@@ -56,7 +57,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         conflict_resolver.register_transaction(tx);
     }
     let stake_weights = node.stake_weights();
-    let total_stake = node.total_stake();
+    let total_stake   = node.total_stake();
     if !stake_weights.is_empty() {
         conflict_resolver.resolve_all_with_stake(&mut node.dag, &stake_weights, total_stake);
     }
@@ -69,8 +70,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
 
     let resolver: SharedResolver = Arc::new(Mutex::new(conflict_resolver));
 
-    let node = Arc::new(Mutex::new(node));
-    let peers = Arc::new(Mutex::new(peers));
+    let node    = Arc::new(Mutex::new(node));
+    let peers   = Arc::new(Mutex::new(peers));
     let storage = Arc::new(storage);
 
     if !cli.peers.is_empty() {
@@ -86,8 +87,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
 
     let port = cli.port;
 
-    let server_node = Arc::clone(&node);
-    let server_peers = Arc::clone(&peers);
+    let server_node     = Arc::clone(&node);
+    let server_peers    = Arc::clone(&peers);
     let server_resolver = Arc::clone(&resolver);
     let server_task = tokio::spawn(async move {
         if let Err(e) = ws_server::start(port, server_node, server_peers, server_resolver).await {

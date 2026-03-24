@@ -1,163 +1,536 @@
-// ghost-node/src/node_runner.rs
+// ghost-node/src/ws_server.rs
 
-use std::path::PathBuf;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::signal;
-use tracing::{info, warn, error};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::{accept_async, tungstenite::Message};
+use futures_util::{SinkExt, StreamExt};
+use tracing::{info, warn, debug};
 
 use ledger::node::Node;
+use ledger::transaction::TransactionVertex;
 use network::peer_list::PeerList;
-use network::ws_client::WsClient;
-use storage::snapshot::SnapshotStorage;
-use consensus::conflict_resolver::ConflictResolver;
+use network::ws_message::{WsMessage, MessageType};
+use consensus::conflict_resolver::{ConflictResolver, CheckpointAnchor};
 
-use crate::cli::Cli;
-use crate::genesis;
-use crate::ws_server::{self, SharedResolver};
+use crate::gossip;
 
-pub async fn run(cli: Cli) -> Result<(), String> {
-    std::fs::create_dir_all(&cli.data_dir)
-        .map_err(|e| format!("failed to create data dir: {}", e))?;
+pub type SharedNode         = Arc<Mutex<Node>>;
+pub type SharedPeers        = Arc<Mutex<PeerList>>;
+pub type SharedSeen         = Arc<Mutex<SeenSet>>;
+pub type SharedResolver     = Arc<Mutex<ConflictResolver>>;
 
-    let snapshot_path = PathBuf::from(cli.snapshot_path());
-    let storage = SnapshotStorage::new(&snapshot_path);
-    let mut node = Node::new();
 
-    let loaded = storage.load(&mut node.dag, &mut node.state)
-        .map_err(|e| format!("snapshot load error: {}", e))?;
-
-    if let Some(wallet_data) = loaded {
-        info!("Resumed from snapshot — {} transactions in DAG", node.dag.vertices.len());
-        if let Some(addr) = wallet_data.get("address") {
-            info!("Genesis address: {}", addr);
-        }
-    } else {
-        info!("No snapshot found — starting fresh");
-        if cli.genesis {
-            match &cli.genesis_address {
-                Some(addr) => {
-                    if !genesis::validate_address(addr) {
-                        return Err(format!("invalid genesis address: {}", addr));
-                    }
-                    genesis::bootstrap(&mut node.state, addr);
-                    let mut wallet_data = std::collections::HashMap::new();
-                    wallet_data.insert("address".to_string(), addr.clone());
-                    storage.save(&node.dag, &node.state, Some(wallet_data))
-                        .map_err(|e| format!("failed to save genesis: {}", e))?;
-                    info!("Genesis snapshot saved to {}", cli.snapshot_path());
-                }
-                None => return Err("--genesis requires --genesis-address".to_string()),
-            }
-        }
-    }
-
-    let mut conflict_resolver = ConflictResolver::new();
-    for tx in node.dag.vertices.values() {
-        conflict_resolver.register_transaction(tx);
-    }
-    let stake_weights = node.stake_weights();
-    let total_stake   = node.total_stake();
-    if !stake_weights.is_empty() {
-        conflict_resolver.resolve_all_with_stake(&mut node.dag, &stake_weights, total_stake);
-    }
-
-    let mut peers = PeerList::new();
-    for peer in &cli.peers {
-        peers.add(peer);
-        info!("Added peer: {}", peer);
-    }
-
-    let resolver: SharedResolver = Arc::new(Mutex::new(conflict_resolver));
-
-    let node    = Arc::new(Mutex::new(node));
-    let peers   = Arc::new(Mutex::new(peers));
-    let storage = Arc::new(storage);
-
-    if !cli.peers.is_empty() {
-        sync_from_peers(Arc::clone(&node), Arc::clone(&peers)).await;
-    }
-
-    {
-        let n = node.lock().await;
-        let stats = n.dag_stats();
-        info!("Node ready — DAG: {} tx, {} tips, {} confirmed",
-            stats.total_vertices, stats.tips, stats.confirmed);
-    }
-
-    let port = cli.port;
-
-    let server_node     = Arc::clone(&node);
-    let server_peers    = Arc::clone(&peers);
-    let server_resolver = Arc::clone(&resolver);
-    let server_task = tokio::spawn(async move {
-        if let Err(e) = ws_server::start(port, server_node, server_peers, server_resolver).await {
-            error!("WebSocket server error: {}", e);
-        }
-    });
-
-    let snapshot_node = Arc::clone(&node);
-    let snapshot_storage = Arc::clone(&storage);
-    let snapshot_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let n = snapshot_node.lock().await;
-            match snapshot_storage.save(&n.dag, &n.state, None) {
-                Ok(_) => info!("Auto-snapshot saved"),
-                Err(e) => warn!("Auto-snapshot failed: {}", e),
-            }
-        }
-    });
-
-    info!("Node running on ws://0.0.0.0:{}", port);
-    info!("Peers: {}", cli.peers.len());
-    info!("Press Ctrl+C to stop");
-
-    match signal::ctrl_c().await {
-        Ok(()) => info!("Shutting down..."),
-        Err(e) => error!("Ctrl+C error: {}", e),
-    }
-
-    server_task.abort();
-    snapshot_task.abort();
-
-    {
-        let n = node.lock().await;
-        match storage.save(&n.dag, &n.state, None) {
-            Ok(_) => info!("Final snapshot saved"),
-            Err(e) => warn!("Failed to save final snapshot: {}", e),
-        }
-        let stats = n.dag_stats();
-        info!("Shutdown — DAG: {} tx, {} confirmed", stats.total_vertices, stats.confirmed);
-    }
-
-    info!("Goodbye.");
-    Ok(())
+pub struct SeenSet {
+    seen:     HashSet<String>,
+    max_size: usize,
 }
 
-async fn sync_from_peers(node: Arc<Mutex<Node>>, peers: Arc<Mutex<PeerList>>) {
-    let peer_list = peers.lock().await.get_all();
-    let client = WsClient::with_timeout(5);
+impl SeenSet {
+    pub fn new(max_size: usize) -> Self {
+        SeenSet { seen: HashSet::new(), max_size }
+    }
 
-    for peer_url in &peer_list {
-        info!("Trying to sync from {}...", peer_url);
-        match client.fetch_state(peer_url).await {
-            Some(state_json) => {
-                let mut n = node.lock().await;
-                if let Some(map) = state_json.get("balances").and_then(|b| b.as_object()) {
-                    for (addr, val) in map {
-                        if let Some(balance) = val.as_u64() {
-                            n.state.ensure_account(addr);
-                            n.state.balances.insert(addr.clone(), balance);
-                        }
-                    }
-                    info!("State synced from {} — {} accounts", peer_url, map.len());
-                    return;
-                }
+    pub fn check_and_insert(&mut self, tx_id: &str) -> bool {
+        if self.seen.contains(tx_id) { return true; }
+        if self.seen.len() >= self.max_size {
+            let half: Vec<String> = self.seen.iter().take(self.max_size / 2).cloned().collect();
+            for id in half { self.seen.remove(&id); }
+        }
+        self.seen.insert(tx_id.to_string());
+        false
+    }
+
+    pub fn size(&self) -> usize { self.seen.len() }
+}
+
+pub async fn start(
+    port: u16,
+    node: SharedNode,
+    peers: SharedPeers,
+    resolver: SharedResolver,
+) -> Result<(), String> {
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&addr).await
+        .map_err(|e| format!("failed to bind {}: {}", addr, e))?;
+
+    info!("WebSocket server listening on ws://{}", addr);
+
+    let seen: SharedSeen = Arc::new(Mutex::new(SeenSet::new(10_000)));
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer_addr)) => {
+                debug!("Incoming connection from {}", peer_addr);
+                let node     = Arc::clone(&node);
+                let peers    = Arc::clone(&peers);
+                let seen     = Arc::clone(&seen);
+                let resolver = Arc::clone(&resolver);
+                tokio::spawn(handle_connection(stream, node, peers, seen, resolver));
             }
-            None => warn!("Could not sync from {}", peer_url),
+            Err(e) => { warn!("Accept error: {}", e); }
         }
     }
-    warn!("Could not sync from any peer — starting with local state");
+}
+
+async fn handle_connection(
+    stream:   TcpStream,
+    node:     SharedNode,
+    peers:    SharedPeers,
+    seen:     SharedSeen,
+    resolver: SharedResolver,
+) {
+    let peer_addr = stream.peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let ws_stream = match accept_async(stream).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            warn!("WebSocket handshake failed from {}: {}", peer_addr, e);
+            return;
+        }
+    };
+
+    info!("Peer connected: {}", peer_addr);
+    let (mut sender, mut receiver) = ws_stream.split();
+
+    while let Some(msg) = receiver.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                let response = handle_message(
+                    &text, &node, &peers, &seen, &resolver,
+                ).await;
+                if let Some(resp) = response {
+                    if let Err(e) = sender.send(Message::Text(resp)).await {
+                        warn!("Failed to send response to {}: {}", peer_addr, e);
+                        break;
+                    }
+                }
+            }
+            Ok(Message::Close(_)) => {
+                info!("Peer disconnected: {}", peer_addr);
+                break;
+            }
+            Ok(Message::Ping(data)) => { let _ = sender.send(Message::Pong(data)).await; }
+            Err(e) => { warn!("WebSocket error from {}: {}", peer_addr, e); break; }
+            _ => {}
+        }
+    }
+}
+
+
+async fn handle_message(
+    raw:      &str,
+    node:     &SharedNode,
+    peers:    &SharedPeers,
+    seen:     &SharedSeen,
+    resolver: &SharedResolver,
+) -> Option<String> {
+    let msg = match WsMessage::from_json(raw) {
+        Ok(m)  => m,
+        Err(e) => { warn!("Invalid message: {}", e); return None; }
+    };
+
+    match msg.msg_type {
+        MessageType::Ping => {
+            Some(WsMessage::pong("ghostledger").to_json())
+        }
+
+        MessageType::Transaction => {
+            handle_transaction(msg.payload, node, peers, seen).await
+        }
+
+        MessageType::StateRequest => {
+            handle_state_request(node).await
+        }
+
+        MessageType::PeerList => {
+            handle_peer_list(msg.payload, peers).await
+        }
+
+        MessageType::CheckpointRequest => {
+            handle_checkpoint_request(node).await
+        }
+
+        MessageType::ExplorerRequest => {
+            handle_explorer_request(node, peers).await
+        }
+
+        MessageType::DifficultyRequest => {
+            let difficulty = node.lock().await.current_difficulty();
+            let resp = WsMessage::new(
+                MessageType::DifficultyResponse,
+                serde_json::json!({"difficulty": difficulty}),
+            );
+            Some(resp.to_json())
+        }
+
+        MessageType::PartitionHandshake => {
+            handle_partition_handshake(msg.payload, node).await
+        }
+
+        MessageType::PartitionSyncRequest => {
+            handle_partition_sync_request(msg.payload, node).await
+        }
+
+        MessageType::PartitionSyncResponse => {
+            handle_partition_sync_response(msg.payload, node, resolver).await
+        }
+
+        _ => None,
+    }
+}
+
+async fn handle_transaction(
+    payload:  serde_json::Value,
+    node:     &SharedNode,
+    peers:    &SharedPeers,
+    seen:     &SharedSeen,
+) -> Option<String> {
+    let tx: TransactionVertex = match serde_json::from_value(payload) {
+        Ok(t)  => t,
+        Err(e) => {
+            warn!("Invalid transaction payload: {}", e);
+            return Some(serde_json::json!({
+                "ok": false, "code": "invalid_payload", "reason": e.to_string()
+            }).to_string());
+        }
+    };
+
+    let tx_id_short = tx.tx_id[..16.min(tx.tx_id.len())].to_string();
+
+    {
+        let mut seen_guard = seen.lock().await;
+        if seen_guard.check_and_insert(&tx.tx_id) {
+            debug!("Duplicate tx ignored: {}...", tx_id_short);
+            return None;
+        }
+    }
+
+    let tx_clone = tx.clone();
+    let result = {
+        let mut n = node.lock().await;
+        n.submit_transaction(tx)
+    };
+
+    if result.ok {
+        info!("Transaction accepted: {}...", tx_id_short);
+        let relay_delay = node.lock().await.relay_delay(&tx_clone.tx_id);
+        if !relay_delay.is_zero() {
+            tokio::time::sleep(relay_delay).await;
+        }
+        gossip::broadcast_transaction(&tx_clone, Arc::clone(peers), None).await;
+    } else {
+        debug!("Transaction rejected: {} — {}", tx_id_short, result.reason);
+    }
+
+    Some(serde_json::json!({
+        "ok": result.ok, "code": result.code, "reason": result.reason,
+    }).to_string())
+}
+
+async fn handle_state_request(node: &SharedNode) -> Option<String> {
+    let n = node.lock().await;
+    let resp = WsMessage::new(MessageType::StateResponse, serde_json::json!({
+        "balances": n.state.balances,
+        "nonces":   n.state.nonces,
+    }));
+    Some(resp.to_json())
+}
+
+async fn handle_peer_list(
+    payload: serde_json::Value,
+    peers:   &SharedPeers,
+) -> Option<String> {
+    if let Some(arr) = payload.get("peers").and_then(|p| p.as_array()) {
+        let mut pl = peers.lock().await;
+        for p in arr {
+            if let Some(addr) = p.as_str() {
+                pl.add(addr);
+                debug!("Added peer: {}", addr);
+            }
+        }
+        let my_peers = pl.get_all();
+        let resp = WsMessage::new(
+            MessageType::PeerList,
+            serde_json::json!({ "peers": my_peers }),
+        );
+        return Some(resp.to_json());
+    }
+    None
+}
+
+async fn handle_checkpoint_request(node: &SharedNode) -> Option<String> {
+    let n = node.lock().await;
+    let cp = n.checkpoint_registry.latest_finalized()
+        .or_else(|| n.checkpoint_registry.latest())?;
+
+    let resp = WsMessage::checkpoint_response(
+        &cp.checkpoint_id,
+        &cp.state_root,
+        cp.sequence,
+        cp.dag_height,
+        cp.address_count,
+        cp.timestamp,
+        cp.is_finalized(),
+    );
+    Some(resp.to_json())
+}
+
+async fn handle_explorer_request(
+    node:  &SharedNode,
+    peers: &SharedPeers,
+) -> Option<String> {
+    let n = node.lock().await;
+    let stats       = n.dag_stats();
+    let difficulty  = n.current_difficulty();
+    let tps         = n.anti_spam.current_tps();
+    let peer_count  = peers.lock().await.size();
+
+    let mut txs: Vec<serde_json::Value> = n.dag.vertices.values()
+        .map(|tx| serde_json::json!({
+            "tx_id":    &tx.tx_id[..16.min(tx.tx_id.len())],
+            "sender":   &tx.sender[..8.min(tx.sender.len())],
+            "receiver": &tx.receiver[..8.min(tx.receiver.len())],
+            "amount":   if tx.commitment.is_some() {
+                            serde_json::Value::String("private".into())
+                        } else {
+                            serde_json::Value::Number(tx.amount.into())
+                        },
+            "private":  tx.commitment.is_some(),
+            "status":   tx.status.as_str(),
+            "timestamp":tx.timestamp,
+            "parents":  tx.parents.len(),
+            "weight":   tx.weight,
+        }))
+        .collect();
+
+    txs.sort_by(|a, b| {
+        let ta = a["timestamp"].as_u64().unwrap_or(0);
+        let tb = b["timestamp"].as_u64().unwrap_or(0);
+        tb.cmp(&ta)
+    });
+    txs.truncate(50);
+
+    let resp = WsMessage::new(MessageType::ExplorerResponse, serde_json::json!({
+        "stats": {
+            "total_tx":  stats.total_vertices,
+            "tips":      stats.tips,
+            "confirmed": stats.confirmed,
+            "pending":   stats.pending,
+            "difficulty":difficulty,
+            "tps":       tps,
+            "peers":     peer_count,
+        },
+        "transactions": txs,
+    }));
+    Some(resp.to_json())
+}
+
+async fn handle_partition_handshake(
+    payload: serde_json::Value,
+    node:    &SharedNode,
+) -> Option<String> {
+    let peer_cp_id  = payload["checkpoint_id"].as_str()?;
+    let peer_seq    = payload["sequence"].as_u64().unwrap_or(0);
+
+    let n = node.lock().await;
+
+    let our_latest_finalized = n.checkpoint_registry.latest_finalized();
+
+    let (common_cp_id, common_seq, ready) = match our_latest_finalized {
+        None => {
+            warn!("PHA handshake: no finalized checkpoint on our side");
+            ("", 0u64, false)
+        }
+        Some(our_cp) => {
+            if peer_seq <= our_cp.sequence {
+                match n.checkpoint_registry.get(peer_cp_id) {
+                    Some(cp) if cp.is_finalized() => {
+                        info!(
+                            "PHA Step 1: cp* = {} (seq {}) — common finalized checkpoint found",
+                            peer_cp_id, peer_seq
+                        );
+                        (peer_cp_id, peer_seq, true)
+                    }
+                    _ => {
+                        info!(
+                            "PHA Step 1: peer cp unknown locally, falling back to our \
+                             latest finalized cp={} seq={}",
+                            our_cp.checkpoint_id, our_cp.sequence
+                        );
+                        (our_cp.checkpoint_id.as_str(), our_cp.sequence, true)
+                    }
+                }
+            } else {
+                info!(
+                    "PHA Step 1: peer ahead (seq {}), we use our latest finalized cp={} seq={}",
+                    peer_seq, our_cp.checkpoint_id, our_cp.sequence
+                );
+                (our_cp.checkpoint_id.as_str(), our_cp.sequence, true)
+            }
+        }
+    };
+
+    let ack = WsMessage::partition_handshake_ack(common_cp_id, common_seq, ready);
+    Some(ack.to_json())
+}
+
+async fn handle_partition_sync_request(
+    payload: serde_json::Value,
+    node:    &SharedNode,
+) -> Option<String> {
+    let above_cp_id = payload["above_checkpoint_id"].as_str()?;
+
+    let n = node.lock().await;
+
+    let cp_finalized = n.checkpoint_registry.get(above_cp_id)
+        .map(|cp| cp.is_finalized())
+        .unwrap_or(false);
+
+    if !cp_finalized {
+        warn!(
+            "PHA sync request for unfinalized checkpoint {} — rejected (Invariant G)",
+            above_cp_id
+        );
+        return Some(WsMessage::partition_sync_response(above_cp_id, serde_json::json!([]), 0).to_json());
+    }
+
+    let descendant_ids = n.dag.descendants_of(above_cp_id);
+
+    let txs: Vec<serde_json::Value> = descendant_ids.iter()
+        .filter_map(|id| n.dag.get_transaction(id))
+        .map(|tx| serde_json::to_value(tx).unwrap_or(serde_json::Value::Null))
+        .filter(|v| !v.is_null())
+        .collect();
+
+    let count = txs.len();
+    info!(
+        "PHA Step 4: serving {} transactions above checkpoint {}",
+        count, above_cp_id
+    );
+
+    let resp = WsMessage::partition_sync_response(
+        above_cp_id,
+        serde_json::Value::Array(txs),
+        count,
+    );
+    Some(resp.to_json())
+}
+
+async fn handle_partition_sync_response(
+    payload:  serde_json::Value,
+    node:     &SharedNode,
+    resolver: &SharedResolver,
+) -> Option<String> {
+    let cp_id = payload["checkpoint_id"].as_str()?;
+    let txs   = payload["transactions"].as_array()?;
+    let count = payload["tx_count"].as_u64().unwrap_or(0);
+
+    info!(
+        "PHA Step 4: received {} transactions above checkpoint {}",
+        count, cp_id
+    );
+
+    {
+        let n = node.lock().await;
+        match n.checkpoint_registry.get(cp_id) {
+            Some(cp) if cp.is_finalized() => {},
+            _ => {
+                warn!("PHA sync response: cp {} not finalized locally — aborting", cp_id);
+                return None;
+            }
+        };
+    }
+    let mut added = 0usize;
+    let mut skipped = 0usize;
+
+    for tx_val in txs {
+        let tx: TransactionVertex = match serde_json::from_value(tx_val.clone()) {
+            Ok(t)  => t,
+            Err(e) => { warn!("PHA: invalid tx in sync response: {}", e); skipped += 1; continue; }
+        };
+
+        let tx_id = tx.tx_id.clone();
+        let mut n = node.lock().await;
+
+        if n.dag.has_transaction(&tx_id) {
+            skipped += 1;
+            continue;
+        }
+
+        {
+            let mut r = resolver.lock().await;
+            r.register_transaction(&tx);
+        }
+
+        match n.dag.add_transaction(tx) {
+            Ok(_) => {
+                n.dag.propagate_weight(&tx_id);
+                added += 1;
+            }
+            Err(e) => {
+                debug!("PHA: could not add tx {}: {}", &tx_id[..8], e);
+                skipped += 1;
+            }
+        }
+    }
+
+    info!(
+        "PHA Step 4 complete: added {} txs, skipped {} (already present or invalid)",
+        added, skipped
+    );
+
+    let cp_anchor = {
+        let n = node.lock().await;
+        let cp = n.checkpoint_registry.get(cp_id).unwrap().clone();
+        CheckpointAnchor::from_dag(
+            cp.checkpoint_id.clone(),
+            cp.dag_height,
+            cp.weight,
+            &n.dag,
+        )
+    };
+
+    let downgraded = {
+        let mut r = resolver.lock().await;
+        r.pha_downgrade_above(&cp_anchor)
+    };
+
+    if !downgraded.is_empty() {
+        info!(
+            "PHA Step 3: downgraded {} conflict(s) to Reconciling",
+            downgraded.len()
+        );
+        for (sender, nonce) in &downgraded {
+            debug!("  Reconciling: sender={} nonce={}", sender, nonce);
+        }
+    }
+
+    let dag_snapshot = {
+        node.lock().await
+    };
+
+    let (globally_closed, still_pending) = {
+        let mut r = resolver.lock().await;
+        r.pha_re_evaluate(&dag_snapshot.dag, &cp_anchor)
+    };
+    drop(dag_snapshot);
+
+    info!(
+        "PHA Steps 5+6 complete: {} conflict(s) → ClosedGlobal, {} still pending (Theorem L)",
+        globally_closed, still_pending
+    );
+
+    let summary = serde_json::json!({
+        "ok": true,
+        "cp_star": cp_id,
+        "txs_added": added,
+        "txs_skipped": skipped,
+        "conflicts_globally_closed": globally_closed,
+        "conflicts_still_pending": still_pending,
+    });
+    Some(summary.to_string())
 }
