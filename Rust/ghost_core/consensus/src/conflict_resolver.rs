@@ -9,7 +9,9 @@ pub const MAX_STAKE_INFLUENCE: f64   = 3.0;
 pub const CLOSURE_SIGMA: f64         = 2.0;
 pub const CHECKPOINT_MIN_WEIGHT: u64 = 6;
 
+// ═══════════════════════════════════════════════════════════════════════════
 // ConflictStatus — 5-state machine
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConflictStatus {
@@ -54,7 +56,9 @@ impl ConflictStatus {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
 // PartitionState — per-conflict partition metadata
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone)]
 pub struct PartitionState {
@@ -193,6 +197,7 @@ impl ClosureResult {
         }
     }
 
+    // constructors
     pub fn not_conflict()                    -> Self { ClosureResult::NotConflict }
     pub fn already_resolved(w: String)       -> Self { ClosureResult::AlreadyResolved { winner: w } }
     pub fn not_ready(ids: Vec<String>)       -> Self { ClosureResult::NotReady { pending_ids: ids } }
@@ -684,7 +689,6 @@ impl ConflictResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ledger::transaction::TransactionVertex;
 
     fn make_tx(tx_id: &str, sender: &str, nonce: u64) -> TransactionVertex {
         let mut tx = TransactionVertex::new(
@@ -933,7 +937,7 @@ mod tests {
     #[test]
     fn test_pha_re_evaluate_dominant_becomes_global() {
         let dag = build_dag_with_cp("cp", vec![
-            ("tx1", "alice", 1, 10), // dominant
+            ("tx1", "alice", 1, 10),
             ("tx2", "alice", 1, 3),
         ]);
         let cp_anchor = CheckpointAnchor::from_dag(
@@ -944,6 +948,7 @@ mod tests {
         r.register_transaction(dag.get_transaction("tx1").unwrap());
         r.register_transaction(dag.get_transaction("tx2").unwrap());
 
+        // Force into Reconciling
         r.try_close_local("alice", 1, &dag, &HashMap::new(), 0.0, &cp_anchor);
         r.pha_downgrade_above(&cp_anchor);
         assert_eq!(r.partition_status("alice", 1), ConflictStatus::Reconciling);
