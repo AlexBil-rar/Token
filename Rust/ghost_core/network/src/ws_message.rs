@@ -19,6 +19,12 @@ pub enum MessageType {
     StateRequest,
     StateResponse,
     PeerList,
+    DifficultyRequest,
+    DifficultyResponse,
+    ExplorerRequest,
+    ExplorerResponse,
+    CheckpointRequest,
+    CheckpointResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_all_message_types_serialize() {
-        let types = vec![
+        let types: Vec<MessageType> = vec![
             MessageType::Transaction,
             MessageType::Ping,
             MessageType::Pong,
