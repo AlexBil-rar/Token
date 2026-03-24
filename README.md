@@ -20,7 +20,9 @@ No miners. No fees. Every transaction does a small proof-of-work and references 
 
 Privacy comes from two layers. Stealth addresses give every payment a unique one-time destination that only the recipient can identify. Pedersen commitments on Ristretto255 hide transaction amounts while still allowing the network to verify balance integrity. These two together hide who paid whom and how much, but they do not hide the graph itself — that is an open problem and the next privacy milestone.
 
-Conflict resolution uses stake-weighted DAG weight with a hard cap on stake influence (max 3x multiplier, normalized against total network stake). This prevents the richest node from having unbounded power over disputes, while still giving honest long-term participants more weight than fresh Sybil nodes.
+Conflict resolution uses stake-weighted DAG weight with a hard cap on stake influence (max 3x multiplier, normalized against total network stake). This prevents the richest node from having unbounded power over disputes, while still giving honest long-term participants more weight than fresh Sybil nodes. Staking is influence, not a gate — transactions from unstaked nodes are valid; they simply carry less weight in disputes.
+
+Parent selection uses a hybrid policy with two explicit parameters: `beta` (consensus bias, `0.0=random .. 1.0=greedy`) and `epsilon` (privacy noise, probability of replacing one parent with a decoy). This unifies what were previously two competing selection strategies and makes the privacy/convergence tradeoff explicit.
 
 ---
 
@@ -29,20 +31,22 @@ Conflict resolution uses stake-weighted DAG weight with a hard cap on stake infl
 **Rust workspace** (`ghost_core/`) — the production-path core:
 
 ```
-crypto/         Ed25519, SHA-256, X25519 stealth addresses, Pedersen commitments
-ledger/         DAG, state, mempool, validator, pruner, anti-spam, batch transactions, Merkle state roots
-consensus/      Stake-weighted conflict resolver (capped), tip selector
-branches/       Parallel DAG branches with quorum merge  [experimental, not on critical path]
-network/        WebSocket P2P, gossip broadcast, peer discovery, eclipse attack detection
-storage/        JSON snapshot persistence
-token/          GHOST token, Proof of Uptime, staking, slashing, validator eligibility
-ghost-node/     Binary node — CLI, genesis, bootstrap, gossip, peer health
-ghost-explorer  TUI block explorer (ratatui)
+crypto/           Ed25519, SHA-256, X25519 stealth addresses, Pedersen commitments
+ledger/           DAG, state, mempool, validator, pruner, anti-spam, batch transactions,
+                  Merkle state roots, checkpoint registry, privacy (decoy pool, diffusion),
+                  parent_selection (ParentSelectionPolicy — unified β/ε hybrid)
+consensus/        Stake-weighted conflict resolver (capped), tip selector, byzantine sim
+branches/         Parallel DAG branches with quorum merge  [experimental, not on critical path]
+network/          WebSocket P2P, gossip broadcast, peer discovery, eclipse attack detection
+storage/          JSON snapshot persistence
+token/            GHOST token, Proof of Uptime, StakingManager (stake/slash/eject/pool)
+ghost-node/       Binary node — CLI, genesis, bootstrap, gossip, peer health
+ghost-explorer    TUI block explorer (ratatui)
 ```
 
 **Python workspace** (`app/`) — the original proof-of-concept. Slower but easier to reason about. Useful for testing protocol logic before porting to Rust.
 
-**Test count:** 382 tests across both workspaces, all passing.
+**Test count:** 184 tests in the Rust workspace, all passing.
 
 ---
 
@@ -59,10 +63,11 @@ Wallet
   → Mempool
   → Consensus: stake-weighted conflict resolution, capped at 3x influence
   → DAG: cumulative weight propagation
+  → Parent selection: ParentSelectionPolicy (β/ε hybrid — conflict-aware + privacy noise)
   → Merkle state root update
   → Snapshot persistence
   → Pruner: sliding window, fixed memory footprint
-  → Gossip broadcast to random peer sample
+  → Gossip broadcast to random peer sample (diffusion delay for timing privacy)
 ```
 
 ---
@@ -71,11 +76,11 @@ Wallet
 
 Being honest about the gaps:
 
-**Staking is a module, not yet a consensus gate.** The staking and slashing framework exists (`staking.rs` — eligibility levels, minimum stake, slash-on-violation, pool distribution). But the node runner does not yet check eligibility before allowing a node to participate in conflict resolution. This needs to be wired up before the validator economics actually matter.
+**Staking influences consensus but does not hard-gate it.** `token::StakingManager` is the single source of truth for stake. Staked nodes get a weight multiplier of `1.0..3.0` applied during conflict resolution and parent selection. There is no hard eligibility gate — transactions from unstaked nodes are valid; they simply carry less weight in disputes. This is intentional: a hard gate would break the `transactions produce consensus` model. Genesis nodes auto-stake `MIN_STAKE` at startup.
 
 **Merkle roots exist but are not anchored to finality.** `merkle.rs` computes state roots and can verify snapshots. But the DAG does not yet store checkpoint hashes, and light sync still trusts the snapshot rather than verifying against a root chain. This is the next infrastructure milestone.
 
-**Privacy stops at amount and address.** Stealth addresses and commitments are implemented and tested. But the transaction graph is still observable — parent links, timing, interaction patterns, and relay paths are all visible. Defending against graph-level deanonymization (decoy parent selection, diffusion smoothing, delayed relay) is not yet done.
+**Privacy stops at amount and address.** Stealth addresses and commitments are implemented and tested. But the transaction graph is still observable — parent links, timing, interaction patterns, and relay paths are all visible. The `parent_selection` module adds decoy parents and diffusion delay, but this is partial mitigation, not a full solution. Defending against graph-level deanonymization is the next privacy milestone.
 
 **P2P is a working prototype.** WebSocket gossip, peer discovery, health checks, eclipse detection, and random sampling are all there. What is not there: QUIC transport, NAT traversal, and a real bootstrap network. "Working P2P prototype" is the accurate description, not "production P2P".
 
@@ -87,11 +92,12 @@ Being honest about the gaps:
 
 ## Known open problems
 
-- Stake-weighted consensus: cap prevents dominance, but fairness under extreme stake skew needs formal analysis
-- Graph deanonymization: current privacy does not protect against timing and topology analysis
-- Staking integration: eligibility checks need to gate the actual consensus path
-- State root anchoring: Merkle roots need to be part of the DAG finality model
-- Threat model: no formal adversary model document yet — this is being written
+- **β/ε tradeoff is a design knob, not a theorem.** `ParentSelectionPolicy` has explicit `beta` (consensus bias) and `epsilon` (privacy noise) parameters. The tradeoff between convergence speed and graph privacy is real and measurable, but there is no formal proof of the optimal values. This is an open research question.
+- **Honest Parent Selection Problem.** Privacy-motivated decoy parents weaken the convergence signal. This is inherent tension in the protocol, not a bug. Documented as an open problem for the whitepaper.
+- **Corollary P is a proof-sketch only.** Liveness under network partition (Theorem P / PHA) has a working implementation and passing tests, but the formal liveness proof under arbitrary multi-partition scenarios is not complete.
+- **Graph deanonymization.** Current privacy does not protect against timing and topology analysis. Decoy parents and diffusion delay reduce the signal but do not eliminate it.
+- **State root anchoring.** Merkle roots need to be part of the DAG finality model.
+- **Threat model.** No formal adversary model document yet — this is being written.
 
 ---
 
@@ -99,9 +105,9 @@ Being honest about the gaps:
 
 Fixed supply of 21,000,000. Nodes earn GHOST for uptime (Proof of Uptime), with diminishing returns for continuous operation to discourage always-on server farming. Address cap at 21,000 GHOST (0.1% of supply). Halvening every 4 years.
 
-Staking is required for validator participation. Slashing applies on provable misbehavior. The goal is that token holdings represent economic commitment to the network, not just accumulated reward.
+Staking is required for full validator participation. The minimum stake is 1,000 GHOST. Slashing applies on provable misbehavior (double vote, conflicting transactions, reputation penalty). The goal is that token holdings represent economic commitment to the network, not just accumulated reward.
 
-This is the intended model. The actual integration between token economics and consensus path is still in progress.
+The staking framework is implemented and wired into conflict resolution. Genesis nodes automatically stake at startup. The remaining gap is anchoring stake state to the DAG finality model.
 
 ---
 
@@ -138,9 +144,10 @@ Web explorer: open `explorer.html` and point it at any running node.
 - [x] Phase 7 — Amount privacy (Pedersen commitments on Ristretto255)
 - [x] Phase 8 — Internal security review (rate limits, peer flooding, overflow, DoS)
 - [x] Phase 8.5 — Merkle state roots, transaction batching, staking framework
-- [ ] Phase 9 — Wire staking into consensus path + anchor Merkle roots to DAG
-- [ ] Phase 10 — Graph privacy (decoy parents, diffusion smoothing)
-- [ ] Phase 11 — Threat model document
+- [x] Phase 9 — Wire staking into consensus path (multiplier model, genesis auto-stake)
+- [x] Phase 9.5 — Unified parent selection (ParentSelectionPolicy β/ε hybrid)
+- [ ] Phase 10 — Graph privacy (decoy parents formalized, diffusion smoothing)
+- [ ] Phase 11 — Threat model document + whitepaper v0.3
 - [ ] Phase 12 — Testnet (3 nodes, different regions)
 - [ ] Phase 13 — External security audit
 - [ ] Phase 14 — Mainnet
