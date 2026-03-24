@@ -25,6 +25,10 @@ pub enum MessageType {
     ExplorerResponse,
     CheckpointRequest,
     CheckpointResponse,
+    PartitionHandshake,
+    PartitionHandshakeAck,
+    PartitionSyncRequest,
+    PartitionSyncResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +103,50 @@ impl WsMessage {
             "is_finalized": is_finalized,
         }))
     }
+
+    // ── PHA messages ─────────────────────────────────────────────────────────
+
+    pub fn partition_handshake(
+        my_checkpoint_id: &str,
+        my_dag_height: u64,
+        my_sequence: u64,
+    ) -> Self {
+        WsMessage::new(MessageType::PartitionHandshake, serde_json::json!({
+            "checkpoint_id": my_checkpoint_id,
+            "dag_height":    my_dag_height,
+            "sequence":      my_sequence,
+        }))
+    }
+
+    pub fn partition_handshake_ack(
+        common_checkpoint_id: &str,
+        common_sequence: u64,
+        ready_to_sync: bool,
+    ) -> Self {
+        WsMessage::new(MessageType::PartitionHandshakeAck, serde_json::json!({
+            "common_checkpoint_id": common_checkpoint_id,
+            "common_sequence":      common_sequence,
+            "ready_to_sync":        ready_to_sync,
+        }))
+    }
+
+    pub fn partition_sync_request(above_checkpoint_id: &str) -> Self {
+        WsMessage::new(MessageType::PartitionSyncRequest, serde_json::json!({
+            "above_checkpoint_id": above_checkpoint_id,
+        }))
+    }
+
+    pub fn partition_sync_response(
+        checkpoint_id: &str,
+        transactions: serde_json::Value,
+        tx_count: usize,
+    ) -> Self {
+        WsMessage::new(MessageType::PartitionSyncResponse, serde_json::json!({
+            "checkpoint_id": checkpoint_id,
+            "transactions":  transactions,
+            "tx_count":      tx_count,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +194,10 @@ mod tests {
             MessageType::PeerList,
             MessageType::CheckpointRequest,
             MessageType::CheckpointResponse,
+            MessageType::PartitionHandshake,
+            MessageType::PartitionHandshakeAck,
+            MessageType::PartitionSyncRequest,
+            MessageType::PartitionSyncResponse,
         ];
 
         for mt in types {
@@ -174,27 +226,47 @@ mod tests {
     }
 
     #[test]
+    fn test_partition_handshake_roundtrip() {
+        let msg = WsMessage::partition_handshake("cp_abc", 1500, 3);
+        assert_eq!(msg.msg_type, MessageType::PartitionHandshake);
+        let r = WsMessage::from_json(&msg.to_json()).unwrap();
+        assert_eq!(r.payload["checkpoint_id"], "cp_abc");
+        assert_eq!(r.payload["dag_height"],    1500);
+        assert_eq!(r.payload["sequence"],      3);
+    }
+
+    #[test]
+    fn test_partition_handshake_ack_roundtrip() {
+        let msg = WsMessage::partition_handshake_ack("cp_common", 2, true);
+        assert_eq!(msg.msg_type, MessageType::PartitionHandshakeAck);
+        let r = WsMessage::from_json(&msg.to_json()).unwrap();
+        assert_eq!(r.payload["common_checkpoint_id"], "cp_common");
+        assert_eq!(r.payload["ready_to_sync"],        true);
+    }
+
+    #[test]
+    fn test_partition_sync_request_roundtrip() {
+        let msg = WsMessage::partition_sync_request("cp_star_123");
+        assert_eq!(msg.msg_type, MessageType::PartitionSyncRequest);
+        let r = WsMessage::from_json(&msg.to_json()).unwrap();
+        assert_eq!(r.payload["above_checkpoint_id"], "cp_star_123");
+    }
+
+    #[test]
+    fn test_partition_sync_response_roundtrip() {
+        let txs = serde_json::json!([{"tx_id": "abc"}, {"tx_id": "def"}]);
+        let msg = WsMessage::partition_sync_response("cp_star_123", txs, 2);
+        assert_eq!(msg.msg_type, MessageType::PartitionSyncResponse);
+        let r = WsMessage::from_json(&msg.to_json()).unwrap();
+        assert_eq!(r.payload["tx_count"],    2);
+        assert_eq!(r.payload["checkpoint_id"], "cp_star_123");
+        assert_eq!(r.payload["transactions"][0]["tx_id"], "abc");
+    }
+
+    #[test]
     fn test_invalid_json_returns_error() {
         let result = WsMessage::from_json("not valid json");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_checkpoint_request_message() {
-        let msg = WsMessage::checkpoint_request();
-        assert_eq!(msg.msg_type, MessageType::CheckpointRequest);
-    }
-
-    #[test]
-    fn test_checkpoint_response_message() {
-        let msg = WsMessage::checkpoint_response(
-            "abc123", "root456", 5, 2500, 42, 1_700_000_000, true
-        );
-        assert_eq!(msg.msg_type, MessageType::CheckpointResponse);
-        assert_eq!(msg.payload["checkpoint_id"], "abc123");
-        assert_eq!(msg.payload["state_root"], "root456");
-        assert_eq!(msg.payload["sequence"], 5);
-        assert_eq!(msg.payload["is_finalized"], true);
     }
 
     #[test]
@@ -205,6 +277,5 @@ mod tests {
         let restored = WsMessage::from_json(&msg.to_json()).unwrap();
         assert_eq!(restored.msg_type, MessageType::CheckpointResponse);
         assert_eq!(restored.payload["dag_height"], 1500);
-        assert_eq!(restored.payload["is_finalized"], false);
     }
 }

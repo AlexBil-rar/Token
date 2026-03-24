@@ -1,6 +1,5 @@
 // consensus/src/byzantine_sim.rs
 
-use std::collections::HashMap;
 
 pub const SIGMA: f64 = 2.0;
 pub const ALPHA: f64 = 3.0;

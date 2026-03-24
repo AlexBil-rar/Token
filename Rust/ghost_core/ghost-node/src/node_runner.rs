@@ -10,12 +10,10 @@ use ledger::node::Node;
 use network::peer_list::PeerList;
 use network::ws_client::WsClient;
 use storage::snapshot::SnapshotStorage;
-use consensus::conflict_resolver::ConflictResolver;
 
 use crate::cli::Cli;
 use crate::genesis;
-use crate::ws_server;
-use crate::peer_discovery;
+use crate::ws_server::{self, SharedResolver};
 
 pub async fn run(cli: Cli) -> Result<(), String> {
     std::fs::create_dir_all(&cli.data_dir)
@@ -25,25 +23,13 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     let storage = SnapshotStorage::new(&snapshot_path);
     let mut node = Node::new();
 
-    let loaded = storage.load_with_stakes(&mut node.dag, &mut node.state)
+    let loaded = storage.load(&mut node.dag, &mut node.state)
         .map_err(|e| format!("snapshot load error: {}", e))?;
 
-    if let Some((wallet_data, saved_stakes, saved_network_start)) = loaded {
-        node.stakes = saved_stakes;
-        if !node.stakes.is_empty() {
-            info!("Restored {} validator stakes from snapshot", node.stakes.len());
-        }
-        if let Some(ns) = saved_network_start {
-            node.network_start = ns;
-            info!("Restored network_start: {}", ns);
-        }
+    if let Some(wallet_data) = loaded {
         info!("Resumed from snapshot — {} transactions in DAG", node.dag.vertices.len());
         if let Some(addr) = wallet_data.get("address") {
             info!("Genesis address: {}", addr);
-        }
-        node.update_state_root();
-        if let Some(root) = &node.last_state_root {
-            info!("State root: {}...", &root[..16]);
         }
     } else {
         info!("No snapshot found — starting fresh");
@@ -53,16 +39,12 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                     if !genesis::validate_address(addr) {
                         return Err(format!("invalid genesis address: {}", addr));
                     }
-                    node.bootstrap_genesis(addr, 10_000_000);
+                    genesis::bootstrap(&mut node.state, addr);
                     let mut wallet_data = std::collections::HashMap::new();
                     wallet_data.insert("address".to_string(), addr.clone());
-                    storage.save_full(&node.dag, &node.state, Some(wallet_data),
-                        &node.stakes, Some(node.network_start))
+                    storage.save(&node.dag, &node.state, Some(wallet_data))
                         .map_err(|e| format!("failed to save genesis: {}", e))?;
                     info!("Genesis snapshot saved to {}", cli.snapshot_path());
-                    if let Some(root) = &node.last_state_root {
-                        info!("Genesis state root: {}...", &root[..16]);
-                    }
                 }
                 None => return Err("--genesis requires --genesis-address".to_string()),
             }
@@ -73,12 +55,9 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     for tx in node.dag.vertices.values() {
         conflict_resolver.register_transaction(tx);
     }
-
     let stake_weights = node.stake_weights();
     let total_stake = node.total_stake();
     if !stake_weights.is_empty() {
-        info!("Resolving conflicts with stake weights ({} validators, total stake: {})",
-            stake_weights.len(), total_stake);
         conflict_resolver.resolve_all_with_stake(&mut node.dag, &stake_weights, total_stake);
     }
 
@@ -87,6 +66,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         peers.add(peer);
         info!("Added peer: {}", peer);
     }
+
+    let resolver: SharedResolver = Arc::new(Mutex::new(conflict_resolver));
 
     let node = Arc::new(Mutex::new(node));
     let peers = Arc::new(Mutex::new(peers));
@@ -99,33 +80,17 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     {
         let n = node.lock().await;
         let stats = n.dag_stats();
-        let validator_count = n.stakes.values().filter(|s| s.is_validator()).count();
-        info!("Node ready — DAG: {} tx, {} tips, {} confirmed, {} validators",
-            stats.total_vertices, stats.tips, stats.confirmed, validator_count);
+        info!("Node ready — DAG: {} tx, {} tips, {} confirmed",
+            stats.total_vertices, stats.tips, stats.confirmed);
     }
 
     let port = cli.port;
 
-    let discovery_peers = Arc::clone(&peers);
-    let discovery_task = tokio::spawn(async move {
-        peer_discovery::run_discovery_loop(discovery_peers, port, 30).await;
-    });
-
-    let health_peers = Arc::clone(&peers);
-    let health_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(
-            std::time::Duration::from_secs(60)
-        );
-        loop {
-            interval.tick().await;
-            peer_discovery::health_check(Arc::clone(&health_peers)).await;
-        }
-    });
-
     let server_node = Arc::clone(&node);
     let server_peers = Arc::clone(&peers);
+    let server_resolver = Arc::clone(&resolver);
     let server_task = tokio::spawn(async move {
-        if let Err(e) = ws_server::start(port, server_node, server_peers).await {
+        if let Err(e) = ws_server::start(port, server_node, server_peers, server_resolver).await {
             error!("WebSocket server error: {}", e);
         }
     });
@@ -136,14 +101,9 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let mut n = snapshot_node.lock().await;
-            n.update_state_root();
-            let root_short = n.last_state_root.as_ref()
-                .map(|r| &r[..16.min(r.len())])
-                .unwrap_or("none")
-                .to_string();
-            match snapshot_storage.save_full(&n.dag, &n.state, None, &n.stakes, Some(n.network_start)) {
-                Ok(_) => info!("Auto-snapshot saved (root: {}...)", root_short),
+            let n = snapshot_node.lock().await;
+            match snapshot_storage.save(&n.dag, &n.state, None) {
+                Ok(_) => info!("Auto-snapshot saved"),
                 Err(e) => warn!("Auto-snapshot failed: {}", e),
             }
         }
@@ -159,22 +119,16 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     }
 
     server_task.abort();
-    discovery_task.abort();
-    health_task.abort();
     snapshot_task.abort();
 
     {
-        let mut n = node.lock().await;
-        n.update_state_root();
-        match storage.save_full(&n.dag, &n.state, None, &n.stakes, Some(n.network_start)) {
+        let n = node.lock().await;
+        match storage.save(&n.dag, &n.state, None) {
             Ok(_) => info!("Final snapshot saved"),
             Err(e) => warn!("Failed to save final snapshot: {}", e),
         }
         let stats = n.dag_stats();
         info!("Shutdown — DAG: {} tx, {} confirmed", stats.total_vertices, stats.confirmed);
-        if let Some(root) = &n.last_state_root {
-            info!("Final state root: {}...", &root[..16]);
-        }
     }
 
     info!("Goodbye.");
@@ -197,7 +151,6 @@ async fn sync_from_peers(node: Arc<Mutex<Node>>, peers: Arc<Mutex<PeerList>>) {
                             n.state.balances.insert(addr.clone(), balance);
                         }
                     }
-                    n.update_state_root();
                     info!("State synced from {} — {} accounts", peer_url, map.len());
                     return;
                 }
