@@ -184,6 +184,7 @@ impl Node {
         select_parents_with_privacy(&tips, &mut self.decoy_pool, &config, 2)
     }
 
+
     pub fn current_difficulty(&self) -> usize {
         self.anti_spam.current_difficulty()
     }
@@ -229,6 +230,10 @@ impl Node {
             .filter(|s| s.is_validator())
             .map(|s| s.amount as f64)
             .unwrap_or(0.0)
+    }
+
+    pub fn conflict_sets(&self) -> &std::collections::HashMap<(String, u64), Vec<String>> {
+        &self.conflict_resolver.conflict_sets
     }
 
     pub fn stake_weights(&self) -> HashMap<String, f64> {
@@ -344,6 +349,7 @@ impl Node {
     }
 
     pub fn submit_transaction(&mut self, tx: TransactionVertex) -> ValidationResult {
+        // 1. Per-address rate limit
         match self.anti_spam.check_and_record_address(&tx.sender) {
             RateLimitResult::Rejected { reason } => {
                 return ValidationResult::err("rate_limited", &reason);
@@ -368,16 +374,19 @@ impl Node {
         let tx_id = tx.tx_id.clone();
         self.mempool.add(tx.clone());
 
+        // 8. State apply
         if self.state.apply_transaction(&tx).is_err() {
             self.mempool.remove(&tx_id);
             return ValidationResult::err("state_error", "failed to apply transaction");
         }
 
+        // 9. DAG insert
         if self.dag.add_transaction(tx).is_err() {
             self.mempool.remove(&tx_id);
             return ValidationResult::err("dag_error", "failed to add to DAG");
         }
 
+        // 10. Weight propagation
         self.dag.propagate_weight(&tx_id);
         self.mempool.remove(&tx_id);
         self.anti_spam.record_transaction();
@@ -403,7 +412,7 @@ impl Node {
         }
 
         if let Some(cp_id) = self.maybe_create_dag_checkpoint() {
-            let _ = cp_id; 
+            let _ = cp_id;
         }
 
         if self.pruner.should_prune_default(&self.dag) {
@@ -486,6 +495,8 @@ mod tests {
         let node = Node::new();
         assert!(node.current_difficulty() >= 2);
     }
+
+    // --- Staking tests ---
 
     #[test]
     fn test_register_stake_success() {

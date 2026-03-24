@@ -91,6 +91,76 @@ impl DAG {
         }
     }
 
+    pub fn is_ancestor_of(&self, ancestor_id: &str, descendant_id: &str) -> bool {
+        if ancestor_id == descendant_id {
+            return false;
+        }
+
+        use std::collections::VecDeque;
+        let mut queue: VecDeque<String> = VecDeque::new();
+        let mut visited: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        if let Some(tx) = self.vertices.get(descendant_id) {
+            for parent in &tx.parents {
+                queue.push_back(parent.clone());
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if current == ancestor_id {
+                return true;
+            }
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.insert(current.clone());
+            if let Some(tx) = self.vertices.get(&current) {
+                for parent in &tx.parents {
+                    if !visited.contains(parent) {
+                        queue.push_back(parent.clone());
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    pub fn descendants_of(&self, ancestor_id: &str) -> std::collections::HashSet<String> {
+        use std::collections::VecDeque;
+        let mut result = std::collections::HashSet::new();
+        let mut queue: VecDeque<String> = VecDeque::new();
+
+        if let Some(children) = self.children_map.get(ancestor_id) {
+            for child in children {
+                queue.push_back(child.clone());
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if result.contains(&current) {
+                continue;
+            }
+            result.insert(current.clone());
+            if let Some(children) = self.children_map.get(&current) {
+                for child in children {
+                    if !result.contains(child) {
+                        queue.push_back(child.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    pub fn all_descend_from(&self, ancestor_id: &str, tx_ids: &[String]) -> bool {
+        if tx_ids.is_empty() {
+            return true;
+        }
+        let descendants = self.descendants_of(ancestor_id);
+        tx_ids.iter().all(|id| descendants.contains(id))
+    }
+
     pub fn stats(&self) -> DagStats {
         let mut confirmed = 0u64;
         let mut rejected = 0u64;
@@ -188,7 +258,7 @@ mod tests {
         dag.add_transaction(make_tx("tx2", vec!["tx1".to_string()])).unwrap();
         dag.propagate_weight("tx2");
 
-        assert_eq!(dag.vertices["tx1"].weight, 2); 
+        assert_eq!(dag.vertices["tx1"].weight, 2);
     }
 
     #[test]
@@ -255,5 +325,96 @@ mod tests {
         tx.status = TxStatus::Rejected;
         dag.add_transaction(tx).unwrap();
         assert!(!dag.get_tips().contains(&"tx1".to_string()));
+    }
+
+    #[test]
+    fn test_is_ancestor_direct_parent() {
+        let mut dag = DAG::new();
+        dag.add_transaction(make_tx("tx1", vec![])).unwrap();
+        dag.add_transaction(make_tx("tx2", vec!["tx1".to_string()])).unwrap();
+        assert!(dag.is_ancestor_of("tx1", "tx2"));
+        assert!(!dag.is_ancestor_of("tx2", "tx1"));
+    }
+
+    #[test]
+    fn test_is_ancestor_transitive() {
+        let mut dag = DAG::new();
+        dag.add_transaction(make_tx("tx1", vec![])).unwrap();
+        dag.add_transaction(make_tx("tx2", vec!["tx1".to_string()])).unwrap();
+        dag.add_transaction(make_tx("tx3", vec!["tx2".to_string()])).unwrap();
+        assert!(dag.is_ancestor_of("tx1", "tx3")); 
+        assert!(dag.is_ancestor_of("tx2", "tx3"));
+        assert!(!dag.is_ancestor_of("tx3", "tx1"));
+    }
+
+    #[test]
+    fn test_is_ancestor_not_related() {
+        let mut dag = DAG::new();
+        dag.add_transaction(make_tx("tx1", vec![])).unwrap();
+        dag.add_transaction(make_tx("tx2", vec![])).unwrap();
+        assert!(!dag.is_ancestor_of("tx1", "tx2"));
+        assert!(!dag.is_ancestor_of("tx2", "tx1"));
+    }
+
+    #[test]
+    fn test_is_ancestor_not_self() {
+        let mut dag = DAG::new();
+        dag.add_transaction(make_tx("tx1", vec![])).unwrap();
+        assert!(!dag.is_ancestor_of("tx1", "tx1"));
+    }
+
+    #[test]
+    fn test_is_ancestor_diamond_dag() {
+        let mut dag = DAG::new();
+        dag.add_transaction(make_tx("tx1", vec![])).unwrap();
+        dag.add_transaction(make_tx("tx2", vec!["tx1".to_string()])).unwrap();
+        dag.add_transaction(make_tx("tx3", vec!["tx1".to_string()])).unwrap();
+        dag.add_transaction(make_tx("tx4", vec![
+            "tx2".to_string(), "tx3".to_string()
+        ])).unwrap();
+        assert!(dag.is_ancestor_of("tx1", "tx4"));
+        assert!(dag.is_ancestor_of("tx2", "tx4"));
+        assert!(dag.is_ancestor_of("tx3", "tx4"));
+        assert!(!dag.is_ancestor_of("tx4", "tx1"));
+    }
+
+    #[test]
+    fn test_descendants_of_empty() {
+        let mut dag = DAG::new();
+        dag.add_transaction(make_tx("tx1", vec![])).unwrap();
+        let desc = dag.descendants_of("tx1");
+        assert!(desc.is_empty());
+    }
+
+    #[test]
+    fn test_descendants_of_chain() {
+        let mut dag = DAG::new();
+        dag.add_transaction(make_tx("tx1", vec![])).unwrap();
+        dag.add_transaction(make_tx("tx2", vec!["tx1".to_string()])).unwrap();
+        dag.add_transaction(make_tx("tx3", vec!["tx2".to_string()])).unwrap();
+        let desc = dag.descendants_of("tx1");
+        assert!(desc.contains("tx2"));
+        assert!(desc.contains("tx3"));
+        assert!(!desc.contains("tx1"));
+    }
+
+    #[test]
+    fn test_all_descend_from() {
+        let mut dag = DAG::new();
+        dag.add_transaction(make_tx("cp", vec![])).unwrap();
+        dag.add_transaction(make_tx("tx1", vec!["cp".to_string()])).unwrap();
+        dag.add_transaction(make_tx("tx2", vec!["cp".to_string()])).unwrap();
+        let ids = vec!["tx1".to_string(), "tx2".to_string()];
+        assert!(dag.all_descend_from("cp", &ids));
+    }
+
+    #[test]
+    fn test_all_descend_from_fails_if_one_missing() {
+        let mut dag = DAG::new();
+        dag.add_transaction(make_tx("cp", vec![])).unwrap();
+        dag.add_transaction(make_tx("tx1", vec!["cp".to_string()])).unwrap();
+        dag.add_transaction(make_tx("tx2", vec![])).unwrap();
+        let ids = vec!["tx1".to_string(), "tx2".to_string()];
+        assert!(!dag.all_descend_from("cp", &ids));
     }
 }

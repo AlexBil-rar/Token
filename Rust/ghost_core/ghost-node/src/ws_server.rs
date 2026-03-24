@@ -11,7 +11,6 @@ use tracing::{info, warn, debug};
 use ledger::node::Node;
 use ledger::transaction::TransactionVertex;
 use network::peer_list::PeerList;
-use network::ws_client::WsClient;
 use network::ws_message::{WsMessage, MessageType};
 
 use crate::gossip;
@@ -32,7 +31,7 @@ impl SeenSet {
 
     pub fn check_and_insert(&mut self, tx_id: &str) -> bool {
         if self.seen.contains(tx_id) {
-            return true; 
+            return true;
         }
         if self.seen.len() >= self.max_size {
             let half: Vec<String> = self.seen.iter()
@@ -42,9 +41,10 @@ impl SeenSet {
             for id in half { self.seen.remove(&id); }
         }
         self.seen.insert(tx_id.to_string());
-        false 
+        false
     }
 
+    #[allow(dead_code)]
     pub fn size(&self) -> usize { self.seen.len() }
 }
 
