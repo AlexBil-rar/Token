@@ -11,10 +11,30 @@ use crate::pruner::Pruner;
 use crate::anti_spam::{AntiSpamController, RateLimitResult};
 use crate::merkle::{MerkleTree, StateCheckpoint};
 use crate::checkpoint::{CheckpointVertex, CheckpointRegistry};
-use crate::privacy::{DecoyPool, DiffusionConfig, ParentSelectionConfig, select_parents_with_privacy};
-use token::staking::{StakingManager, EligibilityStatus};
+use crate::privacy::{DecoyPool, DiffusionConfig};
+use crate::parent_selection::{ParentSelectionPolicy, select_parents as policy_select};
+use token::staking::StakingManager;
+
 
 const RESOLVE_MIN_WEIGHT: u64 = 3;
+
+#[derive(Debug, Clone)]
+pub struct NodeStake {
+    pub address: String,
+    pub amount: u64,
+    pub active: bool,
+    pub violations: u32,
+}
+
+impl NodeStake {
+    pub fn new(address: String, amount: u64) -> Self {
+        NodeStake { address, amount, active: true, violations: 0 }
+    }
+    pub const MIN_STAKE: u64 = 1_000;
+    pub fn is_validator(&self) -> bool {
+        self.active && self.amount >= Self::MIN_STAKE
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct ConflictResolverState {
@@ -103,7 +123,6 @@ pub struct Node {
     pub pruner: Pruner,
     pub anti_spam: AntiSpamController,
     pub staking: StakingManager,
-    pub stakes: HashMap<String, NodeStake>,
     pub network_start: f64,
     pub last_state_root: Option<String>,
     pub checkpoint_height: u64,
@@ -111,6 +130,7 @@ pub struct Node {
     pub conflict_resolver: ConflictResolverState,
     pub decoy_pool: DecoyPool,
     pub diffusion: DiffusionConfig,
+    pub parent_policy: ParentSelectionPolicy,
 }
 
 impl Node {
@@ -133,6 +153,7 @@ impl Node {
             conflict_resolver: ConflictResolverState::new(),
             decoy_pool: DecoyPool::new(50),
             diffusion: DiffusionConfig::default(),
+            parent_policy: ParentSelectionPolicy::default(),
         }
     }
 
@@ -152,12 +173,26 @@ impl Node {
     }
 
     pub fn select_parents_private(&mut self) -> Vec<String> {
-        let tips = self.dag.get_tips();
-        if tips.is_empty() { return vec![]; }
-        let config = ParentSelectionConfig::default();
-        select_parents_with_privacy(&tips, &mut self.decoy_pool, &config, 2)
-    }
+        let conflict_sets = self.conflict_resolver.conflict_sets.clone();
+        let stake_weights = self.stake_weights();
+        let total_stake   = self.total_stake();
 
+        let seed = (self.dag.vertices.len() as u64)
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(self.anti_spam.current_difficulty() as u64);
+
+        let result = policy_select(
+            &self.dag,
+            &conflict_sets,
+            &stake_weights,
+            total_stake,
+            &mut self.decoy_pool,
+            &self.parent_policy,
+            seed,
+        );
+
+        result.parents
+    }
 
     pub fn current_difficulty(&self) -> usize {
         self.anti_spam.current_difficulty()
@@ -171,15 +206,15 @@ impl Node {
     pub fn register_stake(&mut self, address: &str, amount: u64) -> Result<(), String> {
         self.staking.stake(address, amount, &mut self.state.balances)
     }
-    
+
     pub fn stake_weights(&self) -> HashMap<String, f64> {
         self.staking.active_validators()
     }
-    
+
     pub fn total_stake(&self) -> f64 {
         self.staking.total_stake()
     }
-    
+
     pub fn is_validator(&self, address: &str) -> bool {
         self.staking.is_eligible(address)
     }
@@ -194,10 +229,7 @@ impl Node {
     }
 
     pub fn stake_of(&self, address: &str) -> f64 {
-        self.stakes.get(address)
-            .filter(|s| s.is_validator())
-            .map(|s| s.amount as f64)
-            .unwrap_or(0.0)
+        self.staking.get_stake_amount(address)
     }
 
     pub fn conflict_sets(&self) -> &std::collections::HashMap<(String, u64), Vec<String>> {
@@ -304,13 +336,11 @@ impl Node {
     }
 
     pub fn submit_transaction(&mut self, tx: TransactionVertex) -> ValidationResult {
-        // 1. Per-address rate limit
         match self.anti_spam.check_and_record_address(&tx.sender) {
             RateLimitResult::Rejected { reason } => {
                 return ValidationResult::err("rate_limited", &reason);
             }
-            RateLimitResult::Allowed(_priority) => {
-            }
+            RateLimitResult::Allowed(_priority) => {}
         }
 
         let difficulty = self.anti_spam.current_difficulty();
@@ -329,19 +359,16 @@ impl Node {
         let tx_id = tx.tx_id.clone();
         self.mempool.add(tx.clone());
 
-        // 8. State apply
         if self.state.apply_transaction(&tx).is_err() {
             self.mempool.remove(&tx_id);
             return ValidationResult::err("state_error", "failed to apply transaction");
         }
 
-        // 9. DAG insert
         if self.dag.add_transaction(tx).is_err() {
             self.mempool.remove(&tx_id);
             return ValidationResult::err("dag_error", "failed to add to DAG");
         }
 
-        // 10. Weight propagation
         self.dag.propagate_weight(&tx_id);
         self.mempool.remove(&tx_id);
         self.anti_spam.record_transaction();
@@ -451,8 +478,6 @@ mod tests {
         assert!(node.current_difficulty() >= 2);
     }
 
-    // --- Staking tests ---
-
     #[test]
     fn test_register_stake_success() {
         let mut node = Node::new();
@@ -483,7 +508,7 @@ mod tests {
     fn test_register_stake_deducts_balance() {
         let mut node = Node::new();
         node.state.credit("alice", 5000);
-        node.register_stake("alice", 1000);
+        node.register_stake("alice", 1000).ok();
         assert_eq!(node.get_balance("alice"), 4000);
     }
 
@@ -518,8 +543,8 @@ mod tests {
         let mut node = Node::new();
         node.state.credit("alice", 5000);
         node.state.credit("bob", 5000);
-        node.register_stake("alice", 2000);
-        node.register_stake("bob", 3000);
+        node.register_stake("alice", 2000).ok();
+        node.register_stake("bob", 3000).ok();
         assert_eq!(node.total_stake(), 5000.0);
     }
 
@@ -533,7 +558,7 @@ mod tests {
     fn test_stake_weights_includes_validators() {
         let mut node = Node::new();
         node.state.credit("alice", 5000);
-        node.register_stake("alice", 2000);
+        node.register_stake("alice", 2000).ok();
         let weights = node.stake_weights();
         assert!(weights.contains_key("alice"));
         assert_eq!(weights["alice"], 2000.0);
@@ -547,17 +572,14 @@ mod tests {
         assert!(!weights.contains_key("alice"));
     }
 
-
     #[test]
     fn test_update_state_root_after_genesis() {
         let mut node = Node::new();
         node.bootstrap_genesis("alice", 1000);
         let root1 = node.last_state_root.clone().unwrap();
-
         node.state.credit("bob", 500);
         node.update_state_root();
         let root2 = node.last_state_root.clone().unwrap();
-
         assert_ne!(root1, root2);
     }
 
@@ -606,7 +628,6 @@ mod tests {
     fn test_select_parents_private_with_tips() {
         let mut node = Node::new();
         node.bootstrap_genesis("alice", 10_000);
-        use crate::transaction::TransactionVertex;
         for i in 1..=5u64 {
             let mut tx = TransactionVertex::new(
                 "alice".to_string(), "bob".to_string(),

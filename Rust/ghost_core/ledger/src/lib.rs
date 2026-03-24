@@ -10,3 +10,4 @@ pub mod merkle;
 pub mod batch;
 pub mod checkpoint;
 pub mod privacy;
+pub mod parent_selection;
