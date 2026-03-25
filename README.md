@@ -8,7 +8,7 @@ March 2026
 
 ## Abstract
 
-We present GhostLedger, a DAG-based payment ledger that simultaneously targets three properties rarely combined in practice: no transaction fees, strong sender/amount privacy, and decentralized conflict resolution without block producers. The protocol uses cumulative DAG weight for consensus, dynamic proof-of-work for spam resistance, stealth addresses and Pedersen commitments for privacy, and a stake-weighted closure rule for double-spend resolution. We introduce a hybrid parent selection policy parameterized by a consensus bias β and a privacy noise level ε, and show empirically that pure greedy selection (β=1.0) causes DAG divergence via tip starvation, while moderate bias (β∈[0.3, 0.9]) with bounded noise (ε≤0.10) provides stable operation. We also present the Partition Healing Algorithm (PHA) and a 5-state conflict status machine that handles network partitions without coordinator intervention. Safety and liveness are argued informally with identified open problems.
+We present GhostLedger, a DAG-based payment ledger that simultaneously targets three properties rarely combined in practice: no transaction fees, strong sender/amount privacy, and decentralized conflict resolution without block producers. The protocol uses cumulative DAG weight for consensus, dynamic proof-of-work for spam resistance, stealth addresses and Pedersen commitments for privacy, and a stake-weighted closure rule for double-spend resolution. We introduce a hybrid parent selection policy parameterized by a consensus bias β and a privacy noise level ε, and show empirically that pure greedy selection (β=1.0) causes DAG divergence via tip starvation, while moderate bias (β∈[0.3, 0.9]) with bounded noise (ε≤0.10) provides stable operation. We also present the Partition Healing Algorithm (PHA) and a 5-state conflict status machine that handles network partitions without coordinator intervention. Graph-level privacy is addressed via a Dandelion-inspired stem/fluff diffusion model, parent entropy analysis, and an intersection attack detector. Safety and liveness are argued informally with identified open problems.
 
 ---
 
@@ -18,7 +18,7 @@ Payment systems face a persistent trilemma: feeless operation removes economic s
 
 GhostLedger is an attempt to architect all three properties together and to understand what the tradeoffs look like when they are forced to coexist. The core thesis is that spam resistance can come from proof-of-work rather than fees, privacy can be layered at the transaction level without breaking consensus, and conflict resolution can be driven by the transactions themselves via cumulative weight rather than by dedicated validators.
 
-The primary contribution of this paper is not a finished system but a protocol architecture with working Rust implementation (184 passing tests), formal definitions of the key mechanisms, and empirical characterization of the parent selection parameter space.
+The primary contribution of this paper is not a finished system but a protocol architecture with working Rust implementation (207 passing tests), formal definitions of the key mechanisms, empirical characterization of the parent selection parameter space, and a graph privacy layer defending against intersection and timing correlation attacks.
 
 ---
 
@@ -162,9 +162,17 @@ A `BalanceProof` accompanies private transactions to prove that the excess commi
 
 ### 5.3 Graph Privacy
 
-The above mechanisms hide **who** and **how much**, but the transaction graph remains observable. Parent links, timing, interaction patterns, and relay paths are visible to a network observer. This is an open problem addressed partially by the parent selection policy (Section 6.3) and diffusion delay (Section 6.4).
+The above mechanisms hide **who** and **how much**, but the transaction graph remains partially observable. Parent links, timing, and relay paths can be used by a passive observer to infer the sender's network position.
 
-**Open Problem (Graph Deanonymization).** Current privacy does not protect against intersection attacks, timing correlation, or parent topology inference. Decoy parents and diffusion delay reduce the signal but do not eliminate it. A formal privacy model for DAG graphs is future work.
+Three attack vectors are specifically defended against (implemented in `ledger/src/privacy.rs`):
+
+**Intersection attack.** An observer who sees multiple transactions from the same address intersects their parent sets. If the parent sets overlap consistently, the observer narrows down the sender's local DAG view. Mitigated by ε-noise parent selection (decoy injection) and tracked by `IntersectionAttackDetector`, which computes per-address Jaccard overlap and timing regularity scores.
+
+**Timing correlation.** Even with relay delay, a transaction appearing significantly earlier at one node than others identifies that node as the likely origin. Mitigated by Dandelion-style stem/fluff diffusion: ~20% of transactions enter a stem phase (500–1000ms single-relay delay) before broadcast, breaking naive first-seen triangulation.
+
+**Parent topology inference.** Predictable parent selection patterns (e.g. always choosing the heaviest tip) are distinguishable from random. `GraphPrivacyAnalyzer` evaluates each transaction's parent entropy (Shannon entropy over parent weights), fan-out score, and timing exposure, producing a `privacy_score ∈ [0.0, 1.0]`.
+
+**Remaining gap.** Sender address is public on-chain. Decoy pools are bounded (50 entries). The stem phase applies delay locally rather than routing through a true relay chain. A global passive adversary retains meaningful deanonymization capability. No formal anonymity set bound is established. See `THREAT_MODEL.md` for full analysis.
 
 ---
 
@@ -205,15 +213,22 @@ candidates = Tips(G) \ {T : T is a conflict loser}
 
 If all tips are conflict losers (e.g. the winner is no longer a tip), the full tip set is used as fallback. This ensures honest nodes do not reinforce losing transactions.
 
-### 6.4 Diffusion Delay
+### 6.4 Diffusion Delay and Dandelion Phases
 
 To reduce timing correlation, each transaction is relayed with a random delay:
 
 ```
-delay(T) = min_delay + H(T.tx_id)[0:8] mod (max_delay - min_delay)
+delay(T) = min_delay + H(T.tx_id) mod (max_delay - min_delay)
 ```
 
 Default: min=50ms, max=500ms. The delay is deterministic from the transaction ID, ensuring consistent behavior across restarts.
+
+Additionally, each transaction is assigned a Dandelion phase deterministically from its tx_id:
+
+- **Stem phase (~20% of transactions):** relayed with a 500–1000ms delay before broadcast. Intended to obscure the originating node from timing-based observers.
+- **Fluff phase (~80% of transactions):** standard gossip broadcast with the normal 50–500ms delay.
+
+The phase is determined by `H(tx_id) mod 1024 < 205`. Both the phase assignment and the stem delay are fully deterministic and stateless.
 
 ### 6.5 Default Parameters
 
@@ -282,6 +297,8 @@ f · α > (1 - f) · 1  →  f > 1/(1 + α) ≈ 0.25
 ### 8.3 Eclipse Attack
 
 The P2P layer implements subnet-based eclipse detection: if more than 80% of peers share a /16 subnet prefix (among peers ≥ 10), the node logs a warning. Random peer sampling (gossip sample of 8 peers) limits the influence of any single subnet cluster.
+
+Detection is implemented; automatic response (peer rotation) is not yet implemented. See `THREAT_MODEL.md`.
 
 ### 8.4 Parasite DAG
 
@@ -371,7 +388,7 @@ The protocol is implemented as a Rust workspace (`ghost_core/`) with the followi
 | Crate | Responsibility |
 |-------|---------------|
 | `crypto` | Ed25519 signatures, X25519 stealth addresses, Pedersen commitments on Ristretto255 |
-| `ledger` | DAG, state, validator, pruner, anti-spam, Merkle roots, checkpoint registry, `ParentSelectionPolicy` |
+| `ledger` | DAG, state, validator, pruner, anti-spam, Merkle roots, checkpoint registry, `ParentSelectionPolicy`, graph privacy (`GraphPrivacyAnalyzer`, `IntersectionAttackDetector`, Dandelion diffusion) |
 | `consensus` | `ConflictResolver` (5-state machine, PHA), `TipSelector`, Byzantine simulation |
 | `token` | GHOST token, `StakingManager` (stake/slash/eject/pool distribution) |
 | `network` | WebSocket P2P, gossip, peer discovery, eclipse detection |
@@ -379,9 +396,11 @@ The protocol is implemented as a Rust workspace (`ghost_core/`) with the followi
 | `ghost-node` | Binary node — CLI, genesis, bootstrap |
 | `ghost-explorer` | TUI explorer (ratatui) |
 
-Test suite: 184 passing tests across all crates.
+Test suite: 207 passing tests across all crates.
 
 **State root anchoring.** The `CheckpointRegistry` maintains an ordered sequence of `CheckpointVertex` objects, each containing a `state_root` (Merkle root of the ledger state at that DAG height). The `verify_chain()` method validates that the sequence is monotonically increasing in both sequence number and DAG height, and that no checkpoint has an empty state root. When syncing from a peer, `verify_synced_state()` checks the received state against the local latest trusted checkpoint root, rejecting state that does not match.
+
+**Graph privacy layer.** `GraphPrivacyAnalyzer` computes a `privacy_score ∈ [0.0, 1.0]` for each transaction from three components: Shannon entropy over parent weights (low entropy = predictable selection), fan-out score (high parent count relative to DAG width = visible hub), and timing exposure (deviation from the optimal 200ms relay delay). `IntersectionAttackDetector` maintains a sliding window of observations per address and computes intersection risk from timing regularity (coefficient of variation of inter-transaction intervals) and parent Jaccard overlap between consecutive transactions.
 
 ---
 
@@ -395,7 +414,7 @@ We identify the following open problems explicitly:
 
 **3. Corollary P (formal proof).** The liveness argument for PHA under partition is a proof-sketch. A formal proof requires: (a) a bounded gossip model with message loss probability, (b) explicit analysis of the multi-partition case where more than two network components exist simultaneously, and (c) proof that the σ-dominance condition is eventually satisfied under bounded adversarial stake.
 
-**4. Graph privacy.** Current privacy protects amounts and receiver identities but not the graph itself. Timing, parent topology, and relay path analysis can deanonymize senders. A formal privacy model for DAG transaction graphs — analogous to Dandelion for blockchains — is future work.
+**4. Graph deanonymization (partial mitigation).** Graph privacy tools are implemented — `GraphPrivacyAnalyzer`, `IntersectionAttackDetector`, Dandelion stem/fluff. However, the sender address is public on-chain, decoy pools are bounded, and the stem phase applies delay locally rather than routing through a true relay chain. A global passive adversary who observes all network traffic retains significant deanonymization capability. A formal anonymity set bound for DAG graphs remains open.
 
 **5. State root finality chain.** Merkle roots are computed and verified but not yet incorporated into a proper finality chain where each checkpoint commits to the previous checkpoint's root. This would enable secure light clients.
 
@@ -413,17 +432,19 @@ We identify the following open problems explicitly:
 
 **Avalanche (Rocket et al., 2020).** DAG-based metastable consensus via repeated sampling. Provides probabilistic finality. GhostLedger's closure rule is deterministic once the σ-threshold is met, which is stronger but requires more weight accumulation.
 
-**Dandelion (Fanti et al., 2018).** Diffusion relay protocol for blockchain privacy. GhostLedger implements an analogous mechanism (random relay delay) but for DAG broadcast.
+**Dandelion (Fanti et al., 2018).** Diffusion relay protocol for blockchain privacy. GhostLedger implements an analogous stem/fluff mechanism for DAG broadcast, with deterministic phase assignment per transaction and 2× stem delay.
 
 ---
 
 ## 13. Conclusion
 
-GhostLedger demonstrates that a feeless, private, decentralized DAG ledger is architecturally viable. The key mechanisms — cumulative weight consensus, stake-weighted conflict closure with σ-dominance, stealth addresses, Pedersen commitments, hybrid parent selection, and the Partition Healing Algorithm — form a coherent whole that has been implemented and tested.
+GhostLedger demonstrates that a feeless, private, decentralized DAG ledger is architecturally viable. The key mechanisms — cumulative weight consensus, stake-weighted conflict closure with σ-dominance, stealth addresses, Pedersen commitments, hybrid parent selection, graph privacy analysis, and the Partition Healing Algorithm — form a coherent whole that has been implemented and tested.
 
 The empirical results confirm two non-obvious findings: pure greedy parent selection causes DAG divergence regardless of privacy noise level, and high conflict rates produce narrower (healthier) DAGs rather than wider ones.
 
-The protocol has significant open problems — particularly around formal liveness proofs, graph privacy, and optimal parameter selection — and should be considered a research prototype rather than a production system. The implementation is public at https://github.com/AlexBil-rar/Token.
+Privacy at the graph level is partially addressed: parent entropy analysis, intersection attack detection, and Dandelion-style diffusion are implemented and tested. A global passive adversary with access to both network traffic and on-chain data retains meaningful deanonymization capability. This is the primary open problem for the next phase of development.
+
+The protocol should be considered a research prototype. The implementation is public at https://github.com/AlexBil-rar/Token. A full threat model is available in `THREAT_MODEL.md`.
 
 ---
 

@@ -11,7 +11,7 @@ use crate::pruner::Pruner;
 use crate::anti_spam::{AntiSpamController, RateLimitResult};
 use crate::merkle::{MerkleTree, StateCheckpoint};
 use crate::checkpoint::{CheckpointVertex, CheckpointRegistry};
-use crate::privacy::{DecoyPool, DiffusionConfig};
+use crate::privacy::{DecoyPool, DiffusionConfig, GraphPrivacyAnalyzer, IntersectionAttackDetector, DandelionPhase};
 use crate::parent_selection::{ParentSelectionPolicy, select_parents as policy_select};
 use token::staking::StakingManager;
 
@@ -131,6 +131,7 @@ pub struct Node {
     pub decoy_pool: DecoyPool,
     pub diffusion: DiffusionConfig,
     pub parent_policy: ParentSelectionPolicy,
+    pub intersection_detector: IntersectionAttackDetector,
 }
 
 impl Node {
@@ -154,6 +155,7 @@ impl Node {
             decoy_pool: DecoyPool::new(50),
             diffusion: DiffusionConfig::default(),
             parent_policy: ParentSelectionPolicy::default(),
+            intersection_detector: IntersectionAttackDetector::new(20, 3000),
         }
     }
 
@@ -394,6 +396,25 @@ impl Node {
         self.mempool.remove(&tx_id);
         self.anti_spam.record_transaction();
         self.decoy_pool.record(tx_id.clone());
+
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let ts_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let sender_addr = self.dag.get_transaction(&tx_id)
+                .map(|t| t.sender.clone())
+                .unwrap_or_default();
+            let parent_ids = self.dag.get_transaction(&tx_id)
+                .map(|t| t.parents.clone())
+                .unwrap_or_default();
+            if !sender_addr.is_empty() {
+                self.intersection_detector.record_observation(
+                    &sender_addr, tx_id.clone(), ts_ms, parent_ids,
+                );
+            }
+        }
 
         {
             let sender = self.dag.get_transaction(&tx_id)

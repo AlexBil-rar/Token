@@ -235,6 +235,253 @@ impl PrivacyRiskScore {
     }
 }
 
+// ── Phase 10: Graph Privacy ───────────────────────────────────────────────────
+ 
+#[derive(Debug, Clone)]
+pub struct GraphPrivacyMetrics {
+    pub parent_entropy: f64,
+    pub fan_out_score: f64,
+    pub timing_exposure: f64,
+    pub decoy_ratio: f64,
+}
+ 
+impl GraphPrivacyMetrics {
+    pub fn is_vulnerable(&self) -> bool {
+        self.parent_entropy < 0.5
+            || self.fan_out_score > 0.8
+            || self.timing_exposure > 0.7
+    }
+ 
+    /// 0.0 = максимальная приватность, 1.0 = полностью открыт
+    pub fn privacy_score(&self) -> f64 {
+        let entropy_penalty = (1.0 - self.parent_entropy).max(0.0) * 0.35;
+        let fanout_penalty  = self.fan_out_score * 0.30;
+        let timing_penalty  = self.timing_exposure * 0.25;
+        let decoy_bonus     = self.decoy_ratio * 0.10;
+        (entropy_penalty + fanout_penalty + timing_penalty - decoy_bonus).clamp(0.0, 1.0)
+    }
+}
+ 
+pub struct GraphPrivacyAnalyzer;
+ 
+impl GraphPrivacyAnalyzer {
+    /// Анализирует транзакцию в контексте её родителей.
+    ///
+    /// `parent_weights`  — веса каждого из родителей tx
+    /// `total_dag_tips`  — сколько всего tips в DAG (для fan-out нормализации)
+    /// `decoy_count`     — сколько decoy parents у tx
+    /// `relay_delay_ms`  — фактическая задержка relay (из DiffusionConfig)
+    pub fn analyze(
+        parent_weights: &[u64],
+        total_dag_tips: usize,
+        decoy_count: usize,
+        relay_delay_ms: u64,
+    ) -> GraphPrivacyMetrics {
+        let parent_entropy   = Self::shannon_entropy(parent_weights);
+        let fan_out_score    = Self::fan_out(parent_weights.len(), total_dag_tips);
+        let timing_exposure  = Self::timing_exposure(relay_delay_ms);
+        let total_parents    = parent_weights.len().max(1);
+        let decoy_ratio      = (decoy_count as f64 / total_parents as f64).min(1.0);
+ 
+        GraphPrivacyMetrics { parent_entropy, fan_out_score, timing_exposure, decoy_ratio }
+    }
+ 
+    /// Энтропия Шеннона по весам родителей, нормализована к [0,1].
+    /// Высокая → выбор родителей равномерен → атакующий не может предсказать.
+    fn shannon_entropy(weights: &[u64]) -> f64 {
+        if weights.is_empty() { return 0.0; }
+        let total: u64 = weights.iter().sum();
+        if total == 0 { return 0.0; }
+        let total_f = total as f64;
+        let entropy: f64 = weights
+            .iter()
+            .filter(|&&w| w > 0)
+            .map(|&w| { let p = w as f64 / total_f; -p * p.ln() })
+            .sum();
+        let max_entropy = if weights.len() > 1 { (weights.len() as f64).ln() } else { 1.0 };
+        (entropy / max_entropy).clamp(0.0, 1.0)
+    }
+ 
+    /// Насколько tx выделяется как hub по числу родителей относительно DAG.
+    fn fan_out(parent_count: usize, total_tips: usize) -> f64 {
+        if total_tips == 0 || parent_count == 0 { return 0.0; }
+        (parent_count as f64 / total_tips.min(8) as f64).clamp(0.0, 1.0)
+    }
+ 
+    /// Предсказуемость по времени. Оптимум ~200ms.
+    /// Отклонение в любую сторону увеличивает timing correlation risk.
+    fn timing_exposure(delay_ms: u64) -> f64 {
+        let optimal = 200.0f64;
+        let dev = (delay_ms as f64 - optimal).abs();
+        (dev / 400.0).clamp(0.0, 1.0)
+    }
+}
+ 
+// ── IntersectionAttackDetector ────────────────────────────────────────────────
+ 
+#[derive(Debug, Clone)]
+struct AddressObservation {
+    tx_id: String,
+    timestamp_ms: u64,
+    parent_ids: Vec<String>,
+}
+ 
+#[derive(Debug)]
+pub struct IntersectionAttackDetector {
+    observations: std::collections::HashMap<String, std::collections::VecDeque<AddressObservation>>,
+    window_size: usize,
+    /// Порог ритмичности (ms): транзакции с меньшим интервалом — подозрительны.
+    regularity_threshold_ms: u64,
+}
+ 
+impl IntersectionAttackDetector {
+    pub fn new(window_size: usize, regularity_threshold_ms: u64) -> Self {
+        IntersectionAttackDetector {
+            observations: std::collections::HashMap::new(),
+            window_size,
+            regularity_threshold_ms,
+        }
+    }
+ 
+    pub fn record_observation(
+        &mut self,
+        address: &str,
+        tx_id: String,
+        timestamp_ms: u64,
+        parent_ids: Vec<String>,
+    ) {
+        let queue = self.observations
+            .entry(address.to_string())
+            .or_insert_with(std::collections::VecDeque::new);
+        if queue.len() >= self.window_size { queue.pop_front(); }
+        queue.push_back(AddressObservation { tx_id, timestamp_ms, parent_ids });
+    }
+ 
+    /// Риск intersection attack для адреса [0.0, 1.0].
+    ///
+    /// Высокий если:
+    /// 1. Транзакции ритмичны по времени (CV низкий)
+    /// 2. Родители сильно перекрываются между транзакциями (Jaccard высокий)
+    pub fn intersection_risk(&self, address: &str) -> f64 {
+        let obs = match self.observations.get(address) {
+            Some(q) if q.len() >= 2 => q,
+            _ => return 0.0,
+        };
+        let timing_risk  = self.timing_regularity_risk(obs);
+        let overlap_risk = self.parent_overlap_risk(obs);
+        (timing_risk * 0.55 + overlap_risk * 0.45).clamp(0.0, 1.0)
+    }
+ 
+    pub fn is_high_risk(&self, address: &str) -> bool {
+        self.intersection_risk(address) > 0.65
+    }
+ 
+    pub fn observation_count(&self, address: &str) -> usize {
+        self.observations.get(address).map(|q| q.len()).unwrap_or(0)
+    }
+ 
+    /// Оценивает ритмичность: низкий CV → ритмично → высокий риск.
+    fn timing_regularity_risk(
+        &self,
+        obs: &std::collections::VecDeque<AddressObservation>,
+    ) -> f64 {
+        let timestamps: Vec<u64> = obs.iter().map(|o| o.timestamp_ms).collect();
+        if timestamps.len() < 2 { return 0.0; }
+ 
+        let intervals: Vec<u64> = timestamps.windows(2)
+            .map(|w| w[1].saturating_sub(w[0]))
+            .collect();
+ 
+        let mean = intervals.iter().sum::<u64>() as f64 / intervals.len() as f64;
+        if mean == 0.0 { return 1.0; }
+ 
+        let variance: f64 = intervals.iter()
+            .map(|&i| { let d = i as f64 - mean; d * d })
+            .sum::<f64>()
+            / intervals.len() as f64;
+ 
+        let cv = variance.sqrt() / mean;
+        // Низкий CV → ритмично
+        let regularity_score = (1.0 - cv.min(2.0) / 2.0).clamp(0.0, 1.0);
+ 
+        let threshold_proximity = if mean < self.regularity_threshold_ms as f64 {
+            1.0 - mean / self.regularity_threshold_ms as f64
+        } else {
+            0.0
+        };
+ 
+        (regularity_score * 0.7 + threshold_proximity * 0.3).clamp(0.0, 1.0)
+    }
+ 
+    /// Средний Jaccard overlap между соседними наблюдениями по родителям.
+    fn parent_overlap_risk(
+        &self,
+        obs: &std::collections::VecDeque<AddressObservation>,
+    ) -> f64 {
+        let observations: Vec<&AddressObservation> = obs.iter().collect();
+        if observations.len() < 2 { return 0.0; }
+ 
+        let mut overlap_scores = Vec::new();
+        for window in observations.windows(2) {
+            let (a, b) = (window[0], window[1]);
+            if a.parent_ids.is_empty() || b.parent_ids.is_empty() { continue; }
+            let set_a: std::collections::HashSet<&String> = a.parent_ids.iter().collect();
+            let set_b: std::collections::HashSet<&String> = b.parent_ids.iter().collect();
+            let intersection = set_a.intersection(&set_b).count();
+            let union        = set_a.union(&set_b).count();
+            let jaccard = if union > 0 { intersection as f64 / union as f64 } else { 0.0 };
+            overlap_scores.push(jaccard);
+        }
+ 
+        if overlap_scores.is_empty() { return 0.0; }
+        overlap_scores.iter().sum::<f64>() / overlap_scores.len() as f64
+    }
+}
+ 
+// ── Dandelion extension for DiffusionConfig ───────────────────────────────────
+ 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DandelionPhase {
+    /// Stem: пересылаем одному peer, скрываем источник.
+    Stem,
+    /// Fluff: стандартный gossip broadcast.
+    Fluff,
+}
+ 
+impl DiffusionConfig {
+    /// Детерминированно определяет фазу для tx_id.
+    /// ~20% транзакций → Stem, ~80% → Fluff.
+    pub fn dandelion_phase(&self, tx_id: &str) -> DandelionPhase {
+        if !self.enabled { return DandelionPhase::Fluff; }
+        let entropy = tx_id
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(6364136223846793005).wrapping_add(b as u64));
+            if entropy % 1024 < 205 { DandelionPhase::Stem } else { DandelionPhase::Fluff }
+    }
+ 
+    /// Задержка в stem фазе — 2x длиннее обычного relay, размывает timing correlation.
+    pub fn stem_delay(&self, tx_id: &str) -> std::time::Duration {
+        if !self.enabled { return std::time::Duration::ZERO; }
+        let entropy = tx_id
+            .bytes()
+            .take(8)
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let stem_min = self.delay_max_ms;
+        let stem_max = self.delay_max_ms * 2;
+        let range    = stem_max - stem_min;
+        std::time::Duration::from_millis(stem_min + (entropy % (range + 1)))
+    }
+ 
+    /// Возвращает задержку с учётом Dandelion фазы.
+    /// Используй вместо `relay_delay()` в ws_server.rs.
+    pub fn effective_delay(&self, tx_id: &str) -> std::time::Duration {
+        match self.dandelion_phase(tx_id) {
+            DandelionPhase::Stem  => self.stem_delay(tx_id),
+            DandelionPhase::Fluff => self.relay_delay(tx_id),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +698,142 @@ mod tests {
         for factor in &score.factors {
             assert!(!factor.is_empty());
         }
+    }
+
+    #[test]
+    fn test_graph_privacy_high_entropy_is_low_risk() {
+        let metrics = GraphPrivacyAnalyzer::analyze(&[10, 10], 8, 1, 200);
+        assert!(metrics.parent_entropy > 0.9);
+        assert!(!metrics.is_vulnerable());
+    }
+
+    #[test]
+    fn test_graph_privacy_single_parent_low_entropy() {
+        let metrics = GraphPrivacyAnalyzer::analyze(&[100], 8, 0, 50);
+        assert!(metrics.is_vulnerable());
+    }
+
+    #[test]
+    fn test_graph_privacy_decoy_reduces_score() {
+        let no_decoy   = GraphPrivacyAnalyzer::analyze(&[5, 5], 8, 0, 200);
+        let with_decoy = GraphPrivacyAnalyzer::analyze(&[5, 5], 8, 1, 200);
+        assert!(with_decoy.privacy_score() < no_decoy.privacy_score());
+    }
+
+    #[test]
+    fn test_graph_privacy_score_in_range() {
+        let metrics = GraphPrivacyAnalyzer::analyze(&[1, 100, 3], 8, 0, 150);
+        assert!(metrics.privacy_score() >= 0.0);
+        assert!(metrics.privacy_score() <= 1.0);
+    }
+
+    #[test]
+    fn test_graph_privacy_optimal_timing_low_exposure() {
+        let metrics = GraphPrivacyAnalyzer::analyze(&[5, 5], 8, 1, 200);
+        assert!(metrics.timing_exposure < 0.1);
+    }
+
+    #[test]
+    fn test_graph_privacy_extreme_timing_high_exposure() {
+        let metrics = GraphPrivacyAnalyzer::analyze(&[5, 5], 8, 1, 0);
+        assert!(metrics.timing_exposure > 0.4);
+    }
+
+    #[test]
+    fn test_intersection_detector_low_risk_initially() {
+        let detector = IntersectionAttackDetector::new(10, 5000);
+        assert_eq!(detector.intersection_risk("alice"), 0.0);
+    }
+
+    #[test]
+    fn test_intersection_detector_records_and_counts() {
+        let mut detector = IntersectionAttackDetector::new(10, 5000);
+        detector.record_observation("alice", "tx1".into(), 1000, vec!["p1".into()]);
+        detector.record_observation("alice", "tx2".into(), 2000, vec!["p2".into()]);
+        assert_eq!(detector.observation_count("alice"), 2);
+    }
+
+    #[test]
+    fn test_intersection_detector_high_overlap_increases_risk() {
+        let mut detector = IntersectionAttackDetector::new(10, 10000);
+        let parents = vec!["p1".to_string(), "p2".to_string()];
+        for i in 0..5 {
+            detector.record_observation("alice", format!("tx{}", i), i as u64 * 100, parents.clone());
+        }
+        let risk = detector.intersection_risk("alice");
+        assert!(risk > 0.3, "got {}", risk);
+    }
+
+    #[test]
+    fn test_intersection_detector_diverse_parents_low_risk() {
+        let mut detector = IntersectionAttackDetector::new(10, 10000);
+        for i in 0..5 {
+            let parents = vec![format!("unique_parent_{}", i)];
+            detector.record_observation("alice", format!("tx{}", i), i as u64 * 3000, parents);
+        }
+        let risk = detector.intersection_risk("alice");
+        assert!(risk < 0.6, "got {}", risk);
+    }
+
+    #[test]
+    fn test_intersection_detector_window_evicts_old() {
+        let mut detector = IntersectionAttackDetector::new(3, 5000);
+        for i in 0..6 {
+            detector.record_observation("alice", format!("tx{}", i), i as u64 * 1000, vec![]);
+        }
+        assert_eq!(detector.observation_count("alice"), 3);
+    }
+
+    #[test]
+    fn test_intersection_detector_different_addresses_independent() {
+        let mut detector = IntersectionAttackDetector::new(10, 5000);
+        let parents = vec!["p1".to_string()];
+        for i in 0..5 {
+            detector.record_observation("alice", format!("tx{}", i), i as u64 * 100, parents.clone());
+        }
+        assert_eq!(detector.intersection_risk("bob"), 0.0);
+    }
+
+    #[test]
+    fn test_dandelion_phase_returns_stem_or_fluff() {
+        let config = DiffusionConfig::default();
+        for i in 0..20 {
+            let phase = config.dandelion_phase(&format!("tx_test_{}", i));
+            assert!(matches!(phase, DandelionPhase::Stem | DandelionPhase::Fluff));
+        }
+    }
+
+    #[test]
+    fn test_dandelion_phase_deterministic() {
+        let config = DiffusionConfig::default();
+        let p1 = config.dandelion_phase("tx_abc123");
+        let p2 = config.dandelion_phase("tx_abc123");
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn test_dandelion_disabled_always_fluff() {
+        let config = DiffusionConfig::disabled();
+        for i in 0..10 {
+            assert_eq!(config.dandelion_phase(&format!("tx_{}", i)), DandelionPhase::Fluff);
+        }
+    }
+
+    #[test]
+    fn test_dandelion_stem_delay_longer_than_relay() {
+        let config = DiffusionConfig::default();
+        let stem = config.stem_delay("tx_stem_test");
+        assert!(stem.as_millis() >= config.delay_max_ms as u128);
+    }
+
+    #[test]
+    fn test_dandelion_stem_ratio_approx_20_percent() {
+        let config = DiffusionConfig::default();
+        let total = 1000usize;
+        let stem_count = (0..total)
+            .filter(|i| config.dandelion_phase(&format!("tx_ratio_{}", i)) == DandelionPhase::Stem)
+            .count();
+        assert!(stem_count >= 100 && stem_count <= 300,
+            "Stem ratio should be ~20%, got {}%", stem_count / 10);
     }
 }

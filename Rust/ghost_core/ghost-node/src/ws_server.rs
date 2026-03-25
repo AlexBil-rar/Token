@@ -217,7 +217,7 @@ async fn handle_transaction(
 
     if result.ok {
         info!("Transaction accepted: {}...", tx_id_short);
-        let relay_delay = node.lock().await.relay_delay(&tx_clone.tx_id);
+        let relay_delay = node.lock().await.diffusion.effective_delay(&tx_clone.tx_id);
         if !relay_delay.is_zero() {
             tokio::time::sleep(relay_delay).await;
         }

@@ -1,8 +1,0 @@
-Итого приоритеты:
-# Проблема                     Статус                            Следующий шаг   
-1 State root anchoringкод      готов, sync не верифицирует       Phase 10: добавить checkpoint chain verification при sync
-2 β/ε empirical validation     нет симуляций                     Python notebook с convergence experiments
-3 Graph deanonymization        partial mitigation есть           Phase 10 + whitepaper section
-4 Corollary P                  proof-sketch                      явный GST precondition в whitepaper
-5 Threat model                 нет документа                     Phase 11
-6 Parasite DAG                 защита есть, не описана           threat model section
