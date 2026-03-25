@@ -151,14 +151,16 @@ pub struct DiffusionConfig {
     pub delay_min_ms: u64,
     pub delay_max_ms: u64,
     pub enabled: bool,
+    pub privacy_by_default: bool, 
 }
 
 impl Default for DiffusionConfig {
     fn default() -> Self {
         DiffusionConfig {
-            delay_min_ms: 50,   
+            delay_min_ms: 50,
             delay_max_ms: 500,
             enabled: true,
+            privacy_by_default: true, 
         }
     }
 }
@@ -180,7 +182,11 @@ impl DiffusionConfig {
     }
 
     pub fn disabled() -> Self {
-        DiffusionConfig { enabled: false, ..Default::default() }
+        DiffusionConfig {
+            enabled: false,
+            privacy_by_default: false,
+            ..Default::default()
+        }
     }
 }
 

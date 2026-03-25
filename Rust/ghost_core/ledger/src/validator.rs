@@ -54,6 +54,7 @@ impl Validator {
         dag: &DAG,
         difficulty: usize,
         state: &LedgerState,
+        privacy_by_default: bool,  
     ) -> ValidationResult {
         let checks: Vec<ValidationResult> = vec![
             self.validate_structure(tx),
@@ -61,7 +62,8 @@ impl Validator {
             self.validate_parents(tx, dag),
             self.validate_signature(tx),
             self.validate_anti_spam_with_difficulty(tx, difficulty),
-            self.validate_state_readonly(tx, state),    
+            self.validate_state_readonly(tx, state),
+            self.validate_privacy_mode(tx, privacy_by_default),
         ];
         for result in checks {
             if !result.ok { return result; }
@@ -152,6 +154,29 @@ impl Validator {
             Ok(_) => ValidationResult::ok("ok", "signature valid"),
             Err(_) => ValidationResult::err("bad_signature", "signature verification failed"),
         }
+    }
+
+    pub fn validate_privacy_mode(
+        &self,
+        tx: &TransactionVertex,
+        privacy_by_default: bool,
+    ) -> ValidationResult {
+        if !privacy_by_default {
+            return ValidationResult::ok("ok", "privacy mode off");
+        }
+    
+        if tx.sender == "system" || tx.amount == 0 {
+            return ValidationResult::ok("ok", "system tx exempt");
+        }
+    
+        if tx.commitment.is_none() {
+            return ValidationResult::err(
+                "privacy_required",
+                "network is in privacy-by-default mode: commitment required",
+            );
+        }
+    
+        ValidationResult::ok("ok", "privacy check passed")
     }
 
     pub fn validate_anti_spam(&self, tx: &TransactionVertex) -> ValidationResult {

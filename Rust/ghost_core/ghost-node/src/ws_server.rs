@@ -225,11 +225,23 @@ async fn handle_transaction(
 
     if result.ok {
         info!("Transaction accepted: {}...", tx_id_short);
-        let relay_delay = node.lock().await.diffusion.effective_delay(&tx_clone.tx_id);
+    
+        let (phase, relay_delay) = {
+            let n = node.lock().await;
+            let phase = if tx_clone.stem_ttl > 0 {
+                ledger::privacy::DandelionPhase::Stem
+            } else {
+                n.diffusion.dandelion_phase(&tx_clone.tx_id)
+            };
+            let delay = n.diffusion.effective_delay(&tx_clone.tx_id);
+            (phase, delay)
+        };
+    
         if !relay_delay.is_zero() {
             tokio::time::sleep(relay_delay).await;
         }
-        gossip::broadcast_transaction(&tx_clone, Arc::clone(peers), None).await;
+    
+        gossip::dandelion_broadcast(&tx_clone, Arc::clone(peers), None, phase).await;
     } else {
         debug!("Transaction rejected: {} — {}", tx_id_short, result.reason);
     }
@@ -337,6 +349,7 @@ async fn handle_explorer_request(
             "difficulty":difficulty,
             "tps":       tps,
             "peers":     peer_count,
+            "privacy_by_default": n.diffusion.privacy_by_default,
         },
         "transactions": txs,
     }));

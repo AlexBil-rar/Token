@@ -363,7 +363,7 @@ impl Node {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-
+    
         let mut tx = TransactionVertex::new(
             wallet.address.clone(),
             receiver.to_string(),
@@ -373,7 +373,16 @@ impl Node {
             wallet.public_key.clone(),
             parents,
         );
-
+    
+        if self.diffusion.privacy_by_default {
+            use sha2::{Sha256, Digest};
+            let mut h = Sha256::new();
+            h.update(amount.to_le_bytes());
+            h.update(nonce.to_le_bytes());
+            h.update(wallet.address.as_bytes());
+            tx.commitment = Some(hex::encode(h.finalize()));
+        }
+    
         self.mine_anti_spam(&mut tx);
         tx.signature = sign_fn(&tx.signing_payload());
         tx.finalize();
@@ -413,6 +422,7 @@ impl Node {
 
         let result = self.validator.validate_structure_and_dag(
             &tx, &self.dag, difficulty, &self.state,
+            self.diffusion.privacy_by_default, 
         );
         if !result.ok {
             return result;
@@ -515,6 +525,14 @@ impl Node {
 }
 
 #[cfg(test)]
+
+impl Node {
+    pub fn new_for_test() -> Self {
+        let mut node = Self::new();
+        node.diffusion.privacy_by_default = false;
+        node
+    }
+}
 mod tests {
     use super::*;
 

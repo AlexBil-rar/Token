@@ -41,6 +41,7 @@ pub struct TransactionVertex {
     pub tx_id: String,
     pub commitment: Option<String>,    
     pub balance_proof: Option<String>,
+    pub stem_ttl: u8,
 }
 
 impl TransactionVertex {
@@ -70,6 +71,7 @@ impl TransactionVertex {
             tx_id: String::new(),
             commitment: None,
             balance_proof: None,
+            stem_ttl: 0,
         }
     }
 
