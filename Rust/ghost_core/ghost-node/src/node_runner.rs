@@ -27,6 +27,14 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     let loaded = storage.load(&mut node.dag, &mut node.state)
         .map_err(|e| format!("snapshot load error: {}", e))?;
 
+    match node.checkpoint_registry.verify_chain() {
+        Ok(n) if n > 0 => info!("Checkpoint chain verified: {} finalized checkpoints", n),
+        Ok(_) => info!("No finalized checkpoints yet — fresh start"),
+        Err(e) => {
+            return Err(format!("Checkpoint chain invalid on load: {}", e));
+        }
+    }
+        
     if let Some(wallet_data) = loaded {
         info!("Resumed from snapshot — {} transactions in DAG", node.dag.vertices.len());
         if let Some(addr) = wallet_data.get("address") {
@@ -65,6 +73,24 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     let total_stake   = node.total_stake();
     if !stake_weights.is_empty() {
         conflict_resolver.resolve_all_with_stake(&mut node.dag, &stake_weights, total_stake);
+
+        use token::staking::ViolationType;
+        for tx in node.dag.vertices.values() {
+            if matches!(tx.status, ledger::transaction::TxStatus::Conflict) {
+                if node.staking.is_eligible(&tx.sender) {
+                    if let Some(result) = node.staking.slash(
+                        &tx.sender,
+                        ViolationType::ConflictingTx,
+                        &tx.tx_id,
+                    ) {
+                        warn!(
+                            "Slashed {} for conflicting tx {}: -{} GHOST",
+                            tx.sender, &tx.tx_id[..8.min(tx.tx_id.len())], result.slashed_amount
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let mut peers = PeerList::new();

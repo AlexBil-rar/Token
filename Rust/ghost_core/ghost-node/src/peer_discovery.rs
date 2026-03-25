@@ -49,7 +49,11 @@ pub async fn run_discovery_loop(
             let mut peer_list = peers.lock().await;
             let before = peer_list.size();
             for p in &new_peers {
-                peer_list.add(p);
+                if is_subnet_allowed(&peer_list, p) {
+                    peer_list.add(p);
+                } else {
+                    debug!("Peer {} rejected: subnet diversity limit", p);
+                }
             }
             let after = peer_list.size();
             if after > before {
@@ -119,5 +123,71 @@ pub async fn health_check(
             peer_list.remove(p);
             warn!("Removed dead peer: {}", p);
         }
+    }
+
+    pub async fn check_and_respond_eclipse(peers: Arc<Mutex<PeerList>>) {
+        use network::peer_list::EclipseCheck;
+    
+        let check = peers.lock().await.check_eclipse();
+        if let EclipseCheck::Suspected { subnet, count, total } = check {
+            warn!(
+                "Eclipse suspected: subnet {} has {}/{} peers — rotating",
+                subnet, count, total
+            );
+    
+            let to_drop: Vec<String> = {
+                let pl = peers.lock().await;
+                pl.get_all().into_iter()
+                    .filter(|addr| {
+                        addr.trim_start_matches("ws://")
+                            .trim_start_matches("wss://")
+                            .starts_with(&subnet)
+                    })
+                    .take(count / 2)
+                    .collect()
+            };
+    
+            {
+                let mut pl = peers.lock().await;
+                for addr in &to_drop {
+                    pl.remove(addr);
+                    warn!("Eclipse mitigation: dropped peer {}", addr);
+                }
+            }
+        }
+    }
+    
+}
+
+pub fn is_subnet_allowed(peers: &PeerList, new_addr: &str) -> bool {
+    let total = peers.size();
+    if total < 5 {
+        return true;
+    }
+
+    let new_subnet = extract_subnet(new_addr);
+    if new_subnet.is_none() {
+        return true;
+    }
+    let new_subnet = new_subnet.unwrap();
+
+    let same_subnet = peers.get_all().iter()
+        .filter(|addr| extract_subnet(addr).as_deref() == Some(&new_subnet))
+        .count();
+
+    let ratio_after = (same_subnet + 1) as f64 / (total + 1) as f64;
+    ratio_after <= 0.60
+}
+
+fn extract_subnet(address: &str) -> Option<String> {
+    let host = address
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://");
+    let ip = if let Some(pos) = host.rfind(':') { &host[..pos] } else { host };
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
+        Some(format!("{}.{}", parts[0], parts[1]))
+    } else {
+        None
     }
 }

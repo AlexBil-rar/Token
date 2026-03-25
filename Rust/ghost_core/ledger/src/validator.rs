@@ -48,6 +48,42 @@ impl Validator {
         ValidationResult::ok("ok", "structure valid")
     }
 
+    pub fn validate_structure_and_dag(
+        &self,
+        tx: &TransactionVertex,
+        dag: &DAG,
+        difficulty: usize,
+        state: &LedgerState,
+    ) -> ValidationResult {
+        let checks: Vec<ValidationResult> = vec![
+            self.validate_structure(tx),
+            self.validate_duplicate(tx, dag),
+            self.validate_parents(tx, dag),
+            self.validate_signature(tx),
+            self.validate_anti_spam_with_difficulty(tx, difficulty),
+            self.validate_state_readonly(tx, state),    
+        ];
+        for result in checks {
+            if !result.ok { return result; }
+        }
+        ValidationResult::ok("ok", "transaction valid")
+    }
+
+    pub fn validate_state_readonly(
+        &self,
+        tx: &TransactionVertex,
+        state: &LedgerState,
+    ) -> ValidationResult {
+        let balance = state.balances.get(&tx.sender).copied().unwrap_or(0);
+        if balance < tx.amount {
+            return ValidationResult::err(
+                "bad_state",
+                &format!("insufficient balance: have {}, need {}", balance, tx.amount),
+            );
+        }
+        ValidationResult::ok("ok", "balance ok")
+    }
+
     pub fn validate_parents(&self, tx: &TransactionVertex, dag: &DAG) -> ValidationResult {
         if dag.vertices.is_empty() && !tx.parents.is_empty() {
             return ValidationResult::err("bad_parents", "genesis tx must not have parents");

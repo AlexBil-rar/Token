@@ -99,6 +99,14 @@ async fn handle_connection(
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
+                const MAX_MSG_BYTES: usize = 1 * 1024 * 1024; // 1 MB
+                if text.len() > MAX_MSG_BYTES {
+                    warn!(
+                        "Oversized message from {}: {} bytes — dropped",
+                        peer_addr, text.len()
+                    );
+                    continue;
+                }
                 let response = handle_message(
                     &text, &node, &peers, &seen, &resolver,
                 ).await;

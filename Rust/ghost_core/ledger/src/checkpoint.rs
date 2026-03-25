@@ -19,6 +19,7 @@ fn now_secs() -> u64 {
 pub struct CheckpointVertex {
     pub checkpoint_id: String,
     pub state_root: String,
+    pub prev_checkpoint_hash: String,
     pub sequence: u64,
     pub dag_height: u64,
     pub address_count: usize,
@@ -32,6 +33,7 @@ pub struct CheckpointVertex {
 impl CheckpointVertex {
     pub fn new(
         state_root: String,
+        prev_checkpoint_hash: String,  // #2
         sequence: u64,
         dag_height: u64,
         address_count: usize,
@@ -42,6 +44,7 @@ impl CheckpointVertex {
         let mut cp = CheckpointVertex {
             checkpoint_id: String::new(),
             state_root,
+            prev_checkpoint_hash,
             sequence,
             dag_height,
             address_count,
@@ -58,6 +61,7 @@ impl CheckpointVertex {
     pub fn compute_id(&self) -> String {
         let mut h = Sha256::new();
         h.update(self.state_root.as_bytes());
+        h.update(self.prev_checkpoint_hash.as_bytes());
         h.update(self.sequence.to_le_bytes());
         h.update(self.dag_height.to_le_bytes());
         h.update((self.address_count as u64).to_le_bytes());
@@ -168,6 +172,16 @@ impl CheckpointRegistry {
                     next.sequence, prev.dag_height, next.dag_height
                 ));
             }
+            if !next.prev_checkpoint_hash.is_empty()
+                && next.prev_checkpoint_hash != prev.checkpoint_id
+            {
+                return Err(format!(
+                    "chain broken at seq {}: expected prev={} got {}",
+                    next.sequence,
+                    &prev.checkpoint_id[..8.min(prev.checkpoint_id.len())],
+                    &next.prev_checkpoint_hash[..8.min(next.prev_checkpoint_hash.len())]
+                ));
+            }
         }
     
         Ok(finalized.len())
@@ -226,6 +240,7 @@ mod tests {
     fn make_checkpoint(seq: u64, state_root: &str, dag_height: u64) -> CheckpointVertex {
         CheckpointVertex::new(
             state_root.to_string(),
+            String::new(),
             seq,
             dag_height,
             2,
@@ -390,7 +405,7 @@ mod tests {
     #[test]
     fn test_verify_chain_single_finalized() {
         let mut reg = CheckpointRegistry::new();
-        let mut cp = CheckpointVertex::new("root_abc".into(), 1, 500, 2, "node".into(), vec![]);
+        let mut cp = CheckpointVertex::new("root_abc".into(), String::new(), 1, 500, 2, "node".into(), vec![]);
         cp.weight = CHECKPOINT_MIN_WEIGHT;
         reg.register(cp);
         assert_eq!(reg.verify_chain().unwrap(), 1);
@@ -400,7 +415,9 @@ mod tests {
     fn test_verify_chain_monotonic() {
         let mut reg = CheckpointRegistry::new();
         for (seq, dag_h, root) in [(1u64, 500u64, "r1"), (2, 1000, "r2"), (3, 1500, "r3")] {
-            let mut cp = CheckpointVertex::new(root.into(), seq, dag_h, 2, "node".into(), vec![]);
+            let mut cp = CheckpointVertex::new(
+                root.into(), String::new(), seq, dag_h, 2, "node".into(), vec![],
+            );
             cp.weight = CHECKPOINT_MIN_WEIGHT;
             reg.register(cp);
         }
@@ -410,7 +427,7 @@ mod tests {
     #[test]
     fn test_verify_chain_empty_root_fails() {
         let mut reg = CheckpointRegistry::new();
-        let mut cp = CheckpointVertex::new("".into(), 1, 500, 2, "node".into(), vec![]);
+        let mut cp = CheckpointVertex::new("".into(), String::new(), 1, 500, 2, "node".into(), vec![]);
         cp.weight = CHECKPOINT_MIN_WEIGHT;
         reg.register(cp);
         assert!(reg.verify_chain().is_err());
@@ -425,9 +442,49 @@ mod tests {
     #[test]
     fn test_latest_trusted_root_returns_finalized() {
         let mut reg = CheckpointRegistry::new();
-        let mut cp = CheckpointVertex::new("root_xyz".into(), 1, 500, 2, "node".into(), vec![]);
+        let mut cp = CheckpointVertex::new("root_xyz".into(), String::new(), 1, 500, 2, "node".into(), vec![]);
         cp.weight = CHECKPOINT_MIN_WEIGHT;
         reg.register(cp);
         assert_eq!(reg.latest_trusted_root(), Some("root_xyz"));
+    }
+
+    #[test]
+    fn test_verify_chain_broken_hash() {
+        let mut reg = CheckpointRegistry::new();
+    
+        let mut cp1 = CheckpointVertex::new(
+            "root1".into(), String::new(), 1, 500, 2, "node".into(), vec![],
+        );
+        cp1.weight = CHECKPOINT_MIN_WEIGHT;
+        let cp1_id = cp1.checkpoint_id.clone();
+        reg.register(cp1);
+    
+        let mut cp2 = CheckpointVertex::new(
+            "root2".into(), "wrong_hash".into(), 2, 1000, 2, "node".into(), vec![],
+        );
+        cp2.weight = CHECKPOINT_MIN_WEIGHT;
+        reg.register(cp2);
+    
+        assert!(reg.verify_chain().is_err());
+    }
+    
+    #[test]
+    fn test_verify_chain_correct_hash_link() {
+        let mut reg = CheckpointRegistry::new();
+    
+        let mut cp1 = CheckpointVertex::new(
+            "root1".into(), String::new(), 1, 500, 2, "node".into(), vec![],
+        );
+        cp1.weight = CHECKPOINT_MIN_WEIGHT;
+        let cp1_id = cp1.checkpoint_id.clone();
+        reg.register(cp1);
+    
+        let mut cp2 = CheckpointVertex::new(
+            "root2".into(), cp1_id, 2, 1000, 2, "node".into(), vec![],
+        );
+        cp2.weight = CHECKPOINT_MIN_WEIGHT;
+        reg.register(cp2);
+    
+        assert_eq!(reg.verify_chain().unwrap(), 2);
     }
 }

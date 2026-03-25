@@ -159,6 +159,43 @@ impl Node {
         }
     }
 
+    pub fn try_apply_deferred(&mut self) -> usize {
+        let mut applied = 0;
+
+        let candidates: Vec<String> = self.dag.vertices
+            .iter()
+            .filter(|(_, tx)| {
+                matches!(tx.status, crate::transaction::TxStatus::Confirmed)
+                && !self.state.applied_txs.contains(&tx.tx_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut ordered: Vec<(String, u64, u64)> = candidates
+            .iter()
+            .filter_map(|id| {
+                self.dag.get_transaction(id)
+                    .map(|tx| (id.clone(), tx.nonce, tx.timestamp))
+            })
+            .collect();
+        ordered.sort_by_key(|(_, nonce, ts)| (*nonce, *ts));
+
+        for (tx_id, _, _) in ordered {
+            if let Some(tx) = self.dag.get_transaction(&tx_id).cloned() {
+                if matches!(tx.status, crate::transaction::TxStatus::Conflict) {
+                    continue;
+                }
+                match self.state.apply_transaction(&tx) {
+                    Ok(_) => { applied += 1; }
+                    Err(_) => {
+                    }
+                }
+            }
+        }
+
+        applied
+    }
+
     pub fn bootstrap_genesis(&mut self, address: &str, balance: u64) {
         self.state.credit(address, balance);
         self.update_state_root();
@@ -273,8 +310,14 @@ impl Node {
         let sequence = self.checkpoint_registry.len() as u64 + 1;
         let parents = self.select_parents();
 
+        let prev_hash = self.checkpoint_registry
+            .latest_finalized()
+            .map(|cp| cp.checkpoint_id.clone())
+            .unwrap_or_default();
+
         let cp = CheckpointVertex::new(
             state_root.clone(),
+            prev_hash,
             sequence,
             dag_height,
             self.state.balances.len(),
@@ -368,8 +411,8 @@ impl Node {
 
         let difficulty = self.anti_spam.current_difficulty();
 
-        let result = self.validator.validate_full_with_difficulty(
-            &tx, &self.dag, &mut self.state, difficulty,
+        let result = self.validator.validate_structure_and_dag(
+            &tx, &self.dag, difficulty, &self.state,
         );
         if !result.ok {
             return result;
@@ -382,11 +425,6 @@ impl Node {
         let tx_id = tx.tx_id.clone();
         self.mempool.add(tx.clone());
 
-        if self.state.apply_transaction(&tx).is_err() {
-            self.mempool.remove(&tx_id);
-            return ValidationResult::err("state_error", "failed to apply transaction");
-        }
-
         if self.dag.add_transaction(tx).is_err() {
             self.mempool.remove(&tx_id);
             return ValidationResult::err("dag_error", "failed to add to DAG");
@@ -395,6 +433,7 @@ impl Node {
         self.dag.propagate_weight(&tx_id);
         self.mempool.remove(&tx_id);
         self.anti_spam.record_transaction();
+        self.try_apply_deferred();
         self.decoy_pool.record(tx_id.clone());
 
         {
@@ -428,6 +467,19 @@ impl Node {
             let _losers = self.conflict_resolver.resolve_ready(
                 &mut self.dag, &stake_weights, total_stake,
             );
+
+            use token::staking::ViolationType;
+            for (loser_id, loser_sender) in &_losers {
+                if self.staking.is_eligible(&loser_sender) {
+                    if let Some(result) = self.staking.slash(
+                        &loser_sender,
+                        ViolationType::ConflictingTx,
+                        &loser_id,
+                    ) {
+                        let _ = result;
+                    }
+                }
+            }
         }
 
         let total = self.dag.vertices.len() as u64;
@@ -477,6 +529,7 @@ mod tests {
     #[test]
     fn test_bootstrap_genesis() {
         let mut node = Node::new();
+        node.try_apply_deferred();
         node.bootstrap_genesis("genesis_addr", 10_000_000);
         assert_eq!(node.get_balance("genesis_addr"), 10_000_000);
     }
