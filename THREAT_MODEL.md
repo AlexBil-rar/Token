@@ -1,6 +1,6 @@
 # GhostLedger Threat Model
 
-**Version:** 0.1  
+**Version:** 0.2  
 **Date:** March 2026  
 **Author:** Aleksandr Bilyk  
 **Status:** Research prototype — no security guarantees implied
@@ -99,9 +99,9 @@ In the privacy threat model (Section 6), we additionally consider a **passive ob
 - All transactions require PoW with dynamic difficulty (2–6 leading zeros, auto-adjusting with TPS). High flood rate raises difficulty for all.
 - Per-address rate limiting: soft limit 5 tx per 10 seconds, burst limit 10 tx per 10 seconds.
 - `SeenSet` deduplicates gossiped transactions (max 10,000 entries with LRU eviction).
+- WebSocket message size cap enforced at 1MB per message.
 
 **Gaps.**
-- No maximum message size enforcement at the WebSocket layer.
 - Dynamic PoW penalizes all senders including honest ones during an attack.
 - `SeenSet` eviction under sustained flood may cause re-processing of seen transactions.
 
@@ -117,7 +117,7 @@ In the privacy threat model (Section 6), we additionally consider a **passive ob
 
 **Current mitigation.**
 - `DiffusionConfig` applies a deterministic random relay delay (50–500ms) per transaction.
-- Phase 10: Dandelion-style stem/fluff phases. ~20% of transactions enter a stem phase (500–1000ms delay, single-peer relay) before fluff broadcast, breaking naive timing triangulation.
+- Dandelion-style stem/fluff phases. ~20% of transactions enter a stem phase (500–1000ms delay, single-peer relay) before fluff broadcast, breaking naive timing triangulation.
 
 **Gaps.**
 - Stem phase is implemented at the delay level only. True Dandelion requires selecting a random stem relay path and switching to broadcast only at the fluff node. Current implementation applies stem delay locally but still broadcasts to all peers.
@@ -213,15 +213,17 @@ In the privacy threat model (Section 6), we additionally consider a **passive ob
 **Description.** An observer traces transaction amounts to link senders and receivers.
 
 **Current mitigation.**
-- Optional Pedersen commitments on Ristretto255 hide transaction amounts.
-- Balance proofs (via excess commitment) verify no value creation without revealing amounts.
-- Commitments are homomorphically additive: input commitment = sum of output commitments.
+- Pedersen commitments on Ristretto255 hide transaction amounts: `C(v, r) = r·G + v·H` where r is a cryptographically random blinding factor. This is a real commitment with hiding and binding properties — not a hash of the amount.
+- `BalanceProof` verifies no value creation via excess commitment: `Σ C_inputs - Σ C_outputs = excess · G`, where `excess = Σ r_inputs - Σ r_outputs`.
+- `excess_signature` proves the sender knows the blinding difference, preventing forgery.
+- Three-step validator (`validate_confidential_tx`): range proof → balance proof → excess check.
+- Commitments are homomorphically additive: cut-through pruning is safe because `Σ excess_kernels` encodes the full value conservation proof for the pruned history.
 
 **Gaps.**
 - Commitments are optional. Transparent transactions leak amounts in full.
-- No range proofs (Bulletproofs). A commitment could theoretically hide a negative amount creating coins from nothing. Currently only the excess-zero proof is checked, which prevents inflation but does not prove the output amount is non-negative.
+- Range proofs are currently `PlaceholderRangeProof` (`is_production_safe() = false`). The `trait RangeProofSystem` provides the abstraction; a Bulletproofs backend is planned. Without range proofs, a commitment could theoretically hide a negative amount. The excess-zero proof prevents inflation but does not prove non-negativity of individual outputs.
 
-**Residual risk.** Low when commitments are used. High for transparent transactions.
+**Residual risk.** Low for the inflation vector (excess proof prevents it). Medium for negative-amount outputs until Bulletproofs are integrated. High for transparent transactions.
 
 ---
 
@@ -255,19 +257,20 @@ This is the primary open privacy problem. Even with amount and receiver privacy,
 2. **Timing correlation.** Even with relay delay, if a transaction appears at one node significantly earlier than others, that node is a likely origin.
 3. **Decoy detection.** If decoy parents are older or have lower weight than real parents, they are distinguishable, reducing the privacy set.
 
-**Current mitigation (Phase 10).**
+**Current mitigation.**
 - `GraphPrivacyAnalyzer`: measures parent entropy (Shannon entropy over parent weights), fan-out score, and timing exposure for each transaction. Flags vulnerable transactions.
 - `IntersectionAttackDetector`: tracks parent set overlap (Jaccard similarity) and timing regularity (coefficient of variation) per address. Raises risk score when patterns are detectable.
-- `ParentSelectionPolicy` with ε-noise: with probability ε, replaces a real parent with a decoy from the `DecoyPool`. Default ε=0.10.
+- `ParentSelectionPolicy` with ε-noise: with probability ε, replaces a real parent with a decoy from the `DecoyPool`. Default ε=0.10. Decoy selection is weight-adaptive — decoys are preferentially sampled from entries with weights similar to real parents, making them harder to distinguish.
 - Dandelion stem/fluff: ~20% of transactions enter a stem phase with 2× delay before broadcast.
-- `DiffusionConfig`: 50–500ms relay delay, deterministic per tx_id to prevent re-identification.
+- `DiffusionConfig`: 50–500ms relay delay, deterministic per tx_id.
+- Empirical validation: at 50 trials, `origin_recovery_risk` decreases from 0.072 (ε=0.00) to 0.061 (ε=0.10) to 0.045 (ε=0.30), confirming decoy injection measurably reduces graph-level deanonymization risk.
 
 **Gaps.**
 - Sender address is public. All privacy mechanisms protect network origin, not on-chain identity.
 - Decoy pool is bounded (50 entries) and contains only recent transactions. An adversary who knows the decoy pool contents (by observing recent DAG tips) can identify decoys.
 - Stem phase does not implement true Dandelion routing (single relay chain). The current implementation applies delay locally; a network-level adversary still sees the originating IP.
-- `IntersectionAttackDetector` computes risk scores but does not automatically adjust parent selection behavior in response. It is a diagnostic tool, not a defense.
-- No formal anonymity set size bound. The privacy guarantee is qualitative.
+- `IntersectionAttackDetector` computes risk scores and triggers `auto_adjust_privacy()` to increase ε and reduce β under high-risk conditions — but the adjustment is gradual and does not provide hard anonymity guarantees.
+- No formal anonymity set size bound. The privacy guarantee is qualitative and empirical.
 
 **Residual risk.** High for a passive network observer. Medium for an on-chain-only observer who cannot correlate timing.
 
@@ -339,26 +342,46 @@ This is the primary open privacy problem. Even with amount and receiver privacy,
 
 ---
 
+### 7.5 Commitment Forgery (Inflation via Fake Excess)
+
+**Description.** An adversary constructs a confidential transaction with a fake `excess_commitment` that passes validation but creates coins from nothing.
+
+**Attack vector.** Submit a confidential transaction where `Σ C_outputs > Σ C_inputs` but supply a forged `excess_commitment` that makes the validator's balance check pass.
+
+**Current mitigation.**
+- `validate_balance_proof()` verifies that `Σ C_inputs - Σ C_outputs = excess_commitment` using the homomorphic property of Pedersen commitments. Forging this requires breaking the discrete log problem on Ristretto255.
+- `validate_excess()` verifies that `excess_commitment` and `excess_signature` are present and structurally valid (valid hex, non-null).
+- The three-step `validate_confidential_tx` enforces all three checks in sequence; a transaction failing any step is rejected.
+
+**Gaps.**
+- Without range proofs (Bulletproofs), a commitment can hide a negative amount. The balance proof prevents the sum from being wrong, but individual output commitments could commit to negative values that sum correctly. This is the negative-amount inflation vector.
+- `PlaceholderRangeProof` is not production-safe (`is_production_safe() = false`). The validator allows `Experimental` status through, which means the range proof check is structurally present but not cryptographically binding.
+
+**Residual risk.** Low for sum-level inflation (excess proof prevents it). Medium for negative-amount outputs until Bulletproofs replace the placeholder backend.
+
+---
+
 ## 8. Threat Summary Table
 
 | # | Threat | Layer | Severity | Mitigation Status |
 |---|--------|-------|----------|-------------------|
 | 1 | Eclipse attack | Network | High | Partial — detection without response |
 | 2 | Sybil attack | Network | Medium | Partial — stake cost but no hard gate |
-| 3 | DoS via flooding | Network | Medium | Partial — PoW + rate limit, no size cap |
+| 3 | DoS via flooding | Network | Medium | Partial — PoW + rate limit + 1MB cap |
 | 4 | Timing correlation | Network | High | Partial — delay + Dandelion delay, not full routing |
 | 5 | Parasite DAG | Consensus | Medium | Mitigated — σ-dominance + state root verification |
 | 6 | Double-spend | Consensus | High | Mitigated — 5-state machine + PHA convergence |
 | 7 | Stake grinding | Consensus | Low | Partial — 3× cap; no double-spend slashing |
 | 8 | Partition / split-brain | Consensus | Medium | Mitigated for 2-way; uncharacterized multi-way |
-| 9 | Amount linkability | Privacy | High | Mitigated (Pedersen) — optional only |
+| 9 | Amount linkability | Privacy | High | Mitigated (real Pedersen + excess kernel) — optional only |
 | 10 | Receiver linkability | Privacy | High | Mitigated (stealth) — optional only |
-| 11 | Graph deanonymization | Privacy | High | Partial — Phase 10 metrics + Dandelion delay |
+| 11 | Graph deanonymization | Privacy | High | Partial — Phase 10 metrics + Dandelion delay + adaptive ε |
 | 12 | Replay attack | Protocol | Low | Mitigated — nonce + SeenSet |
 | 13 | Integer overflow | Implementation | Low | Mitigated — saturating arithmetic |
 | 14 | PoW bypass | Implementation | Low | Mitigated — hash recomputation |
 | 15 | Snapshot corruption | Implementation | Medium | Partial — atomic write; no chain validation on load |
 | 16 | Signature malleability | Implementation | Low | Mitigated — Ed25519 non-malleable |
+| 17 | Commitment forgery / inflation | Privacy | Medium | Partial — excess proof prevents sum inflation; negative outputs possible until Bulletproofs |
 
 ---
 
@@ -382,19 +405,19 @@ Listed by priority:
 **High priority.**
 1. **Eclipse response.** On detection, trigger automatic peer rotation: drop 50% of same-subnet peers and attempt connections to diverse addresses from a bootstrap list.
 2. **True Dandelion routing.** Implement stem phase as a relay chain: forward stem transactions to a single random peer rather than applying delay locally. This provides origin IP hiding rather than timing obfuscation only.
-3. **WebSocket message size cap.** Enforce a maximum message size at the WebSocket layer (suggested: 1MB) to prevent memory exhaustion.
+3. **Bulletproofs range proofs.** Replace `PlaceholderRangeProof` with a real Bulletproofs backend via `trait RangeProofSystem`. This closes the negative-amount inflation vector and makes range proof status `Verified` rather than `Experimental`. Blocked on `curve25519-dalek v3/v4` ecosystem conflict.
 
 **Medium priority.**
-4. **Double-spend slashing.** Add a violation type `ConflictingTx` to `StakingManager`. Nodes that submit conflicting transactions lose a fraction of stake, increasing the economic cost of double-spend attempts.
-5. **Range proofs.** Add Bulletproofs for committed amounts to prove non-negativity without revealing values. This closes the negative-amount inflation vector.
-6. **Checkpoint chain on load.** On snapshot load, run `verify_chain()` against the loaded checkpoint registry to detect local corruption before syncing.
+4. **Double-spend slashing.** Add slashing for `ConflictingTx` violations in `StakingManager`. Nodes that submit conflicting transactions lose a fraction of stake, increasing the economic cost of double-spend attempts.
+5. **Checkpoint chain on load.** On snapshot load, run `verify_chain()` against the loaded checkpoint registry to detect local corruption before syncing.
+6. **Kernel sum validation (full).** Implement full `validate_kernel_sum()` using RistrettoPoint addition to verify `Σ excess_kernels = Σ C_inputs_all - Σ C_outputs_all` across the entire ledger. Currently only structural presence is checked.
 
 **Low priority.**
 7. **Minimum peer diversity.** When adding peers, reject connections that would push any /16 subnet above 60% of the peer list.
-8. **Adaptive decoy selection.** In `ParentSelectionPolicy`, bias decoy selection toward tips with weights similar to real parents (to make decoys indistinguishable by weight).
-9. **Cover traffic.** Periodically broadcast dummy transactions with valid PoW from nodes with no real activity, to obscure the absence of real transactions.
+8. **Cover traffic.** Periodically broadcast dummy transactions with valid PoW from nodes with no real activity, to obscure the absence of real transactions.
+9. **Light client support.** Incorporate checkpoint state roots into a proper finality chain (each checkpoint commits to the previous checkpoint's root) to enable trustless light client sync.
 
 ---
 
-*GhostLedger Threat Model v0.1 — March 2026*  
+*GhostLedger Threat Model v0.2 — March 2026*  
 *This document describes a research prototype. It is not a security audit.*

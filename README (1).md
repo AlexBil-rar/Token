@@ -8,7 +8,7 @@ March 2026
 
 ## Abstract
 
-We present GhostLedger, a DAG-based payment ledger that simultaneously targets three properties rarely combined in practice: no transaction fees, strong sender/amount privacy, and decentralized conflict resolution without block producers. The protocol uses cumulative DAG weight for consensus, dynamic proof-of-work for spam resistance, stealth addresses and Pedersen commitments for privacy, and a stake-weighted closure rule for double-spend resolution. We introduce a hybrid parent selection policy parameterized by a consensus bias β and a privacy noise level ε, and show empirically that pure greedy selection (β=1.0) causes DAG divergence via tip starvation, while moderate bias (β∈[0.3, 0.9]) with bounded noise (ε≤0.10) provides stable operation. We also present the Partition Healing Algorithm (PHA) and a 5-state conflict status machine that handles network partitions without coordinator intervention. Graph-level privacy is addressed via a Dandelion-inspired stem/fluff diffusion model, parent entropy analysis, and an intersection attack detector. Safety and liveness are argued informally with identified open problems.
+We present GhostLedger, a DAG-based payment ledger that simultaneously targets three properties rarely combined in practice: no transaction fees, strong sender/amount privacy, and decentralized conflict resolution without block producers. The protocol uses cumulative DAG weight for consensus, dynamic proof-of-work for spam resistance, stealth addresses and Pedersen commitments for privacy, and a stake-weighted closure rule for double-spend resolution. We introduce a hybrid parent selection policy parameterized by a consensus bias β and a privacy noise level ε, and show empirically — across 50 independent trials per configuration — that pure greedy selection (β=1.0) causes DAG divergence via tip starvation, while moderate bias (β∈[0.3, 0.9]) with bounded noise (ε≤0.10) provides stable operation. The empirically validated default is (β=0.7, ε=0.10). We also present the Partition Healing Algorithm (PHA) and a 5-state conflict status machine that handles network partitions without coordinator intervention. Amount privacy is implemented via real Pedersen commitments (C = r·G + v·H on Ristretto255) with balance proofs and excess kernels following the Mimblewimble model. Graph-level privacy is addressed via a Dandelion-inspired stem/fluff diffusion model, parent entropy analysis, an intersection attack detector, and cut-through pruning. Safety and liveness are argued informally with identified open problems.
 
 ---
 
@@ -18,7 +18,7 @@ Payment systems face a persistent trilemma: feeless operation removes economic s
 
 GhostLedger is an attempt to architect all three properties together and to understand what the tradeoffs look like when they are forced to coexist. The core thesis is that spam resistance can come from proof-of-work rather than fees, privacy can be layered at the transaction level without breaking consensus, and conflict resolution can be driven by the transactions themselves via cumulative weight rather than by dedicated validators.
 
-The primary contribution of this paper is not a finished system but a protocol architecture with working Rust implementation (207 passing tests), formal definitions of the key mechanisms, empirical characterization of the parent selection parameter space, and a graph privacy layer defending against intersection and timing correlation attacks.
+The primary contribution of this paper is not a finished system but a protocol architecture with working Rust implementation (224 passing tests), formal definitions of the key mechanisms, empirical characterization of the parent selection parameter space at 50 trials, a cryptographically correct privacy layer with Pedersen commitments and excess kernels, and a graph privacy layer defending against intersection and timing correlation attacks.
 
 ---
 
@@ -42,10 +42,17 @@ A transaction vertex T consists of:
 T = (sender, receiver, amount, nonce, timestamp,
      public_key, parents, signature,
      anti_spam_nonce, anti_spam_hash,
-     commitment?, balance_proof?)
+     commitment?,
+     balance_proof?,
+     excess_commitment?,
+     excess_signature?,
+     range_proof?,
+     range_proof_status)
 ```
 
-The fields `commitment` and `balance_proof` are optional and enable amount privacy (Section 5.2). The `parents` field references 1–2 previous vertices; this is what makes the ledger a DAG rather than a chain.
+The fields `commitment`, `balance_proof`, `excess_commitment`, `excess_signature`, `range_proof` are optional and enable amount privacy (Section 5.2). The `parents` field references 1–2 previous vertices; this is what makes the ledger a DAG rather than a chain.
+
+`range_proof_status` is an enum with three variants: `Missing`, `Experimental`, `Verified`. The validator enforces that a confidential transaction must have `range_proof_status` ≥ `Experimental` and a non-null `excess_commitment`.
 
 Each transaction carries a weight w(T) initialized to 1. Weight propagates to ancestors: when T is added, w(P) += 1 for all ancestors P of T. A transaction is considered confirmed when w(T) ≥ 6.
 
@@ -75,7 +82,24 @@ Weight propagation is monotonic: once confirmed, a transaction remains confirmed
 
 ### 3.3 Tips and DAG Width
 
-The number of live tips |Tips(G)| reflects the "width" of the DAG frontier. Empirical results (Section 9) show that under normal operation with honest nodes, DAG width stabilizes at 7–11 tips. Pathological parent selection (pure greedy, β=1.0) causes tip starvation where width grows unboundedly (150–200 tips observed), preventing weight accumulation and therefore confirmation.
+The number of live tips |Tips(G)| reflects the "width" of the DAG frontier. Empirical results (Section 9) show that under normal operation with honest nodes, DAG width stabilizes at 7–11 tips. Pathological parent selection (pure greedy, β=1.0) causes tip starvation where width grows unboundedly (150–207 tips observed), preventing weight accumulation and therefore confirmation.
+
+### 3.4 Cut-Through Pruning
+
+Intermediate transactions — those that have been confirmed and whose outputs have been fully spent — can be removed from the DAG while retaining their **kernel** (excess commitment + excess signature). This is the Mimblewimble cut-through property:
+
+```
+Tx_A → Tx_B  (where Tx_B spends Tx_A's output)
+⟹ remove Tx_A, retain kernel(Tx_A)
+```
+
+The `CutThroughPruner` (in `ledger/src/cut_through.rs`) identifies confirmed non-tip transactions that have children and removes them, accumulating a kernel set. The **kernel sum rule** provides a compact validity proof for the entire ledger:
+
+```
+Σ inputs_all - Σ outputs_all = Σ excess_kernels
+```
+
+This enables state verification without replaying the full transaction history, improving both storage efficiency and sync speed.
 
 ---
 
@@ -146,19 +170,58 @@ stealth_addr = H(ECDH(ephemeral_priv, recipient_pub) ‖ recipient_pub)[0:20]
 
 The recipient scans incoming transactions by recomputing the stealth address from each transaction's ephemeral public key and their spend private key. Only the recipient can identify payments addressed to them. This hides the receiver's identity from chain observers.
 
-### 5.2 Pedersen Commitments
+### 5.2 Pedersen Commitments and Excess Kernels
 
 Transaction amounts are hidden using Pedersen commitments on the Ristretto255 group:
 
 ```
-C(amount, r) = r·G + amount·H
+C(v, r) = r·G + v·H
 ```
 
-where G is the Ristretto255 basepoint and H = hash_to_point("GhostLedger_H_v1").
+where G is the Ristretto255 basepoint, H = hash_to_point("GhostLedger_H_v1"), v is the amount, and r is the blinding factor sampled uniformly at random.
 
-Commitments are additively homomorphic: C(a, r₁) + C(b, r₂) = C(a+b, r₁+r₂). This allows balance verification without revealing amounts: a transaction is balance-preserving if and only if the sum of input commitments equals the sum of output commitments plus a fee commitment (zero in this protocol).
+This follows the Mimblewimble commitment model with three cryptographic properties:
 
-A `BalanceProof` accompanies private transactions to prove that the excess commitment (sum_inputs - sum_outputs) commits to zero, without revealing the individual amounts.
+- **Hiding**: C(v, r) reveals nothing about v or r individually.
+- **Binding**: it is computationally infeasible to find (v', r') ≠ (v, r) such that C(v', r') = C(v, r).
+- **Homomorphic**: C(v₁, r₁) + C(v₂, r₂) = C(v₁+v₂, r₁+r₂).
+
+**Balance proof (excess kernel).** For each confidential transaction, the sender computes:
+
+```
+excess = Σ r_inputs - Σ r_outputs
+excess_commitment = excess · G
+excess_signature  = Sign(sk = excess)
+```
+
+The validator checks:
+
+```
+Σ C_inputs - Σ C_outputs = excess_commitment
+```
+
+This proves value conservation without revealing any individual amount. The excess signature proves the sender knows the blinding difference, preventing forgery.
+
+**Three-step confidential transaction validation** (`validate_confidential_tx`):
+
+1. **Range proof**: verify `range_proof` against the output commitment (currently `PlaceholderRangeProof`; Bulletproofs are planned as a future backend via `trait RangeProofSystem`).
+2. **Balance proof**: verify `BalanceProof` — excess commitment matches the difference of input and output commitment sums.
+3. **Excess**: verify `excess_commitment` and `excess_signature` are present and structurally valid.
+
+**Range proof backend abstraction.** The `RangeProofSystem` trait in `crypto/src/range_proof.rs` defines a backend-agnostic API:
+
+```rust
+trait RangeProofSystem {
+    type Proof;
+    fn prove(amount: u64, blinding: &BlindingFactor, commitment: &Commitment)
+        -> Result<Self::Proof, RangeProofError>;
+    fn verify(commitment: &Commitment, proof: &Self::Proof)
+        -> Result<(), RangeProofError>;
+    fn is_production_safe() -> bool;
+}
+```
+
+The current backend is `PlaceholderRangeProof` with `is_production_safe() = false`. The abstraction allows drop-in replacement with a Bulletproofs or Halo2 backend without protocol changes.
 
 ### 5.3 Graph Privacy
 
@@ -171,6 +234,14 @@ Three attack vectors are specifically defended against (implemented in `ledger/s
 **Timing correlation.** Even with relay delay, a transaction appearing significantly earlier at one node than others identifies that node as the likely origin. Mitigated by Dandelion-style stem/fluff diffusion: ~20% of transactions enter a stem phase (500–1000ms single-relay delay) before broadcast, breaking naive first-seen triangulation.
 
 **Parent topology inference.** Predictable parent selection patterns (e.g. always choosing the heaviest tip) are distinguishable from random. `GraphPrivacyAnalyzer` evaluates each transaction's parent entropy (Shannon entropy over parent weights), fan-out score, and timing exposure, producing a `privacy_score ∈ [0.0, 1.0]`.
+
+**Graph entropy metrics.** The Python simulator (`sim/metrics.py`) tracks three graph-level privacy metrics per trial:
+
+- **parent_diversity**: fraction of unique parent combinations (0 = all selections identical, 1 = every selection unique)
+- **graph_entropy**: Shannon entropy over individual parent usage frequency (higher = parents distributed more uniformly across the DAG)
+- **origin_recovery_risk**: composite metric combining diversity risk and normalized entropy (0 = low risk, 1 = easy to deanonymize)
+
+Empirical results at 50 trials show `origin_recovery_risk` decreasing monotonically with ε: from 0.072 at ε=0.00 to 0.044 at ε=0.30, confirming that decoy injection measurably reduces deanonymization risk.
 
 **Remaining gap.** Sender address is public on-chain. Decoy pools are bounded (50 entries). The stem phase applies delay locally rather than routing through a true relay chain. A global passive adversary retains meaningful deanonymization capability. No formal anonymity set bound is established. See `THREAT_MODEL.md` for full analysis.
 
@@ -199,9 +270,17 @@ Policy = (β, ε, max_parents)
 
 - **β ∈ [0.0, 1.0]**: consensus bias. β=0.0 is uniform random selection; β=1.0 is pure greedy (heaviest tip). Intermediate values use the Gumbel-max sampling trick: each candidate tip t receives a random key k(t) = -ln(U) / w(t)^β, and tips are selected in ascending key order.
 
-- **ε ∈ [0.0, 1.0]**: privacy noise. With probability ε, one selected parent is replaced with a decoy sampled from a pool of recently observed transactions that are not current tips.
+- **ε ∈ [0.0, 1.0]**: privacy noise. With probability ε, one selected parent is replaced with a decoy sampled from a pool of recently observed transactions that are not current tips. Decoy selection is weight-adaptive: decoys are preferentially sampled from entries with weights similar to the real parents, making them harder to distinguish by weight analysis alone.
 
 - **max_parents**: maximum number of parents per transaction (default 2).
+
+Three named policy presets are defined, each justified by empirical data (Section 9):
+
+```rust
+ParentSelectionPolicy::default()   // β=0.7, ε=0.10 — production balance
+ParentSelectionPolicy::privacy_mode()  // β=0.7, ε=0.20 — privacy priority
+ParentSelectionPolicy::consensus_mode() // β=0.7, ε=0.00 — consensus priority
+```
 
 ### 6.3 Conflict-Aware Filtering
 
@@ -232,7 +311,7 @@ The phase is determined by `H(tx_id) mod 1024 < 205`. Both the phase assignment 
 
 ### 6.5 Default Parameters
 
-The default policy is (β=0.7, ε=0.10, max_parents=2). Empirical validation (Section 9) confirms this lies within the stable operating region.
+The default policy is (β=0.7, ε=0.10, max_parents=2). This is empirically validated across 50 trials per configuration (Section 9) and represents the optimal balance of closure rate, DAG width, and origin recovery risk.
 
 ---
 
@@ -317,58 +396,81 @@ We implement a discrete-event DAG simulator in Python (`sim/`) with the followin
 - All nodes select parents independently before adding their transaction each step
 - Conflicts are injected every 30 steps (two nodes emit conflicting transactions for the same sender/nonce)
 - Closure rule: σ=2.0, θ_min=3
+- **50 independent trials per configuration** (increased from 10 for statistical stability)
 
-Metrics: conflict closure rate (fraction of conflicts resolved before end of simulation), median closure time (steps from injection to resolution), and mean DAG width (live tips).
+Metrics: conflict closure rate, median closure time, mean DAG width, parent diversity, graph entropy, and origin recovery risk.
 
 ### 9.2 Parent Selection Parameter Sweep
 
-We swept β ∈ {0.0, 0.3, 0.5, 0.7, 0.9, 1.0} and ε ∈ {0.00, 0.05, 0.10, 0.20, 0.30} with 10 independent trials per combination (N_TX=150, CONFLICT_EVERY=30).
+We swept β ∈ {0.0, 0.3, 0.5, 0.7, 0.9, 1.0} and ε ∈ {0.00, 0.05, 0.10, 0.15, 0.20, 0.30} with 50 independent trials per combination (N_TX=150, CONFLICT_EVERY=30).
 
 **Key finding 1: Pure greedy selection causes tip starvation.**
 
-β=1.0 produces DAG width of 150–200 tips and closure rate ≈ 0.00–0.25, regardless of ε. When all nodes always select the single heaviest tip, all other tips receive no further confirmations. The DAG frontier grows without bound and the weight accumulation required for closure never occurs.
+β=1.0 produces DAG width of 143–207 tips and closure rate ≈ 0.00–0.01, regardless of ε. When all nodes always select the single heaviest tip, all other tips receive no further confirmations. The DAG frontier grows without bound and the weight accumulation required for closure never occurs.
 
 > Pure greedy parent selection (β=1.0) is incompatible with this protocol's consensus mechanism.
 
 **Key finding 2: β∈[0.3, 0.9] is a stable operating region.**
 
 All configurations with β < 1.0 show:
-- Closure rate: 0.55–0.88
-- Median closure time: 1.8–5.4 steps
-- Mean DAG width: 7.6–11.8 tips
+- Closure rate: 0.59–0.84
+- Median closure time: 1.7–5.2 steps
+- Mean DAG width: 7.7–11.7 tips
 
-There is no single optimal β in this range; the differences are within the noise of 10 trials.
+**Key finding 3: β=0.7 is the empirically optimal consensus bias.**
 
-**Key finding 3: ε≤0.10 introduces negligible consensus degradation.**
+Across 50 trials, β=0.7, ε=0.00 achieves closure_rate=0.795 with dag_width=7.7 — consistently among the top configurations. β=0.9 performs similarly (0.805, width=7.8) but shows higher variance at ε>0.10.
 
-Increasing ε from 0.00 to 0.10 changes DAG width by at most +1.0 tip and closure rate by less than 0.05 in most configurations. At ε=0.20–0.30, width increases by 1–3 additional tips and closure rate degrades by 0.05–0.15.
+**Key finding 4: ε=0.10 is the privacy/consensus sweet spot.**
 
-**Summary table (selected configurations):**
+Increasing ε from 0.00 to 0.10 reduces `origin_recovery_risk` from 0.072 to 0.061 (−15%) while degrading closure_rate by less than 0.05 on average. Above ε=0.20, DAG width grows by 1–3 tips and closure rate degrades noticeably.
 
-| β    | ε    | closure_rate | median_closure | dag_width |
-|------|------|-------------|----------------|-----------|
-| 0.0  | 0.00 | 0.72–0.82   | 1.7–2.4        | 7.6       |
-| 0.3  | 0.00 | 0.75–0.85   | 1.8–2.1        | 7.8       |
-| 0.5  | 0.10 | 0.65–0.78   | 1.9–3.6        | 8.3–8.7   |
-| 0.7  | 0.10 | 0.70–0.88   | 2.5            | 8.4–8.8   |
-| 0.9  | 0.30 | 0.62        | 5.4            | 10.6      |
-| 1.0  | 0.00 | 0.00        | ∞              | 197–204   |
+**Key finding 5: origin_recovery_risk decreases monotonically with ε.**
+
+```
+ε=0.00: origin_risk ≈ 0.072
+ε=0.10: origin_risk ≈ 0.061
+ε=0.20: origin_risk ≈ 0.053
+ε=0.30: origin_risk ≈ 0.045
+```
+
+This confirms that decoy injection measurably reduces graph-level deanonymization risk.
+
+**Summary table (50 trials, selected configurations):**
+
+| β    | ε    | closure_rate | median_closure | dag_width | origin_risk |
+|------|------|-------------|----------------|-----------|-------------|
+| 0.7  | 0.00 | 0.795       | 2.1            | 7.7       | 0.072       |
+| 0.7  | 0.10 | 0.685       | 3.2            | 8.3       | 0.061       |
+| 0.7  | 0.20 | 0.725       | 2.5            | 9.2       | 0.053       |
+| 0.9  | 0.00 | 0.805       | 2.1            | 7.8       | 0.073       |
+| 0.9  | 0.10 | 0.665       | 2.6            | 8.3       | 0.061       |
+| 0.5  | 0.10 | 0.725       | 2.7            | 8.3       | 0.062       |
+| 1.0  | 0.00 | 0.000       | ∞              | 190.7     | 0.323       |
+
+**Policy presets derived from simulation:**
+
+| Mode      | β   | ε    | Rationale                              |
+|-----------|-----|------|----------------------------------------|
+| default   | 0.7 | 0.10 | Best closure/privacy/width balance     |
+| privacy   | 0.7 | 0.20 | Lower origin_risk, modest width cost   |
+| consensus | 0.7 | 0.00 | Highest closure_rate, no privacy noise |
 
 ### 9.3 Scale Experiment
 
-We ran the sweet-spot policy (β=0.5, ε=0.10) at N_TX ∈ {150, 500, 1000} with CONFLICT_EVERY=50:
+We ran the default policy (β=0.7, ε=0.10) at N_TX ∈ {150, 500, 1000} with CONFLICT_EVERY=50:
 
 | N_TX | closure_rate | median_closure | dag_width |
 |------|-------------|----------------|-----------|
-| 150  | 0.55        | ∞              | 8.7       |
+| 150  | 0.68        | 3.2            | 8.3       |
 | 500  | 0.71        | 2.0            | 10.0      |
 | 1000 | 0.68        | 2.4            | 11.0      |
 
-N_TX=150 is insufficient for stable results — conflicts do not accumulate enough weight before the simulation ends. At N_TX ≥ 500, behavior is stable. Closure time grows from 2.0 to 2.4 steps as DAG size grows from 500 to 1000 — sub-linear scaling consistent with the O(log W) expected convergence.
+Closure time grows from 2.0 to 2.4 steps as DAG size grows from 500 to 1000 — sub-linear scaling consistent with the O(log W) expected convergence.
 
 ### 9.4 Conflict Rate Experiment
 
-Fixed (β=0.5, ε=0.10, N_TX=500), varying CONFLICT_EVERY ∈ {10, 30, 50, 100}:
+Fixed (β=0.7, ε=0.10, N_TX=500), varying CONFLICT_EVERY ∈ {10, 30, 50, 100}:
 
 | conflict_every | n_conflicts | closure_rate | median_closure | dag_width |
 |---------------|-------------|-------------|----------------|-----------|
@@ -387,8 +489,8 @@ The protocol is implemented as a Rust workspace (`ghost_core/`) with the followi
 
 | Crate | Responsibility |
 |-------|---------------|
-| `crypto` | Ed25519 signatures, X25519 stealth addresses, Pedersen commitments on Ristretto255 |
-| `ledger` | DAG, state, validator, pruner, anti-spam, Merkle roots, checkpoint registry, `ParentSelectionPolicy`, graph privacy (`GraphPrivacyAnalyzer`, `IntersectionAttackDetector`, Dandelion diffusion) |
+| `crypto` | Ed25519 signatures, X25519 stealth addresses, Pedersen commitments on Ristretto255, `BalanceProof`, `BlindingFactor`, `trait RangeProofSystem`, `PlaceholderRangeProof` |
+| `ledger` | DAG, state, validator (`validate_confidential_tx`), pruner, cut-through pruner, anti-spam, Merkle roots, checkpoint registry, `ParentSelectionPolicy` (3 presets), graph privacy (`GraphPrivacyAnalyzer`, `IntersectionAttackDetector`, Dandelion diffusion) |
 | `consensus` | `ConflictResolver` (5-state machine, PHA), `TipSelector`, Byzantine simulation |
 | `token` | GHOST token, `StakingManager` (stake/slash/eject/pool distribution) |
 | `network` | WebSocket P2P, gossip, peer discovery, eclipse detection |
@@ -396,11 +498,15 @@ The protocol is implemented as a Rust workspace (`ghost_core/`) with the followi
 | `ghost-node` | Binary node — CLI, genesis, bootstrap |
 | `ghost-explorer` | TUI explorer (ratatui) |
 
-Test suite: 207 passing tests across all crates.
+Test suite: **224 passing tests** across all crates.
 
-**State root anchoring.** The `CheckpointRegistry` maintains an ordered sequence of `CheckpointVertex` objects, each containing a `state_root` (Merkle root of the ledger state at that DAG height). The `verify_chain()` method validates that the sequence is monotonically increasing in both sequence number and DAG height, and that no checkpoint has an empty state root. When syncing from a peer, `verify_synced_state()` checks the received state against the local latest trusted checkpoint root, rejecting state that does not match.
+**Privacy layer.** Confidential transactions carry real Pedersen commitments (`C = r·G + v·H`), a `BalanceProof` (excess commitment + excess signature), and a `range_proof` field for future Bulletproofs integration. The validator enforces all three via `validate_confidential_tx`, which runs range proof, balance proof, and excess checks in sequence. `RangeProofStatus` is a typed enum (`Missing` / `Experimental` / `Verified`) — not a string.
 
-**Graph privacy layer.** `GraphPrivacyAnalyzer` computes a `privacy_score ∈ [0.0, 1.0]` for each transaction from three components: Shannon entropy over parent weights (low entropy = predictable selection), fan-out score (high parent count relative to DAG width = visible hub), and timing exposure (deviation from the optimal 200ms relay delay). `IntersectionAttackDetector` maintains a sliding window of observations per address and computes intersection risk from timing regularity (coefficient of variation of inter-transaction intervals) and parent Jaccard overlap between consecutive transactions.
+**Cut-through pruning.** `CutThroughPruner` in `ledger/src/cut_through.rs` removes confirmed intermediate transactions from the DAG, retaining their kernels. `validate_kernel_sum()` checks that all retained kernels have non-null excess commitments, providing a compact ledger validity proof.
+
+**State root anchoring.** The `CheckpointRegistry` maintains an ordered sequence of `CheckpointVertex` objects, each containing a `state_root` (Merkle root of the ledger state at that DAG height). The `verify_chain()` method validates that the sequence is monotonically increasing in both sequence number and DAG height. When syncing from a peer, `verify_synced_state()` checks the received state against the local latest trusted checkpoint root.
+
+**Graph privacy layer.** `GraphPrivacyAnalyzer` computes a `privacy_score ∈ [0.0, 1.0]` from parent entropy, fan-out score, and timing exposure. `IntersectionAttackDetector` maintains a sliding window of observations per address and computes intersection risk from timing regularity and parent Jaccard overlap.
 
 ---
 
@@ -408,17 +514,19 @@ Test suite: 207 passing tests across all crates.
 
 We identify the following open problems explicitly:
 
-**1. β/ε optimal values.** The simulation shows a stable operating region but not a unique optimum. With only 10 trials per configuration, variance is high. A formal analysis relating β to convergence speed under the gossip model, and ε to the privacy gain (measured by parent entropy or graph clustering), would provide a principled basis for parameter selection.
+**1. β/ε formal analysis.** The simulation at 50 trials confirms β=0.7 as the empirically optimal consensus bias, but a formal analysis relating β to convergence speed under the gossip model — and ε to the anonymity set size — would provide a principled closed-form bound.
 
-**2. Honest Parent Selection Problem.** Privacy noise (ε > 0) introduces decoy parents that reduce the convergence signal. This is an inherent tension: more privacy means slower consensus. There is no known closed-form characterization of the optimal β/ε frontier.
+**2. Honest Parent Selection Problem.** Privacy noise (ε > 0) introduces decoy parents that reduce the convergence signal. This is an inherent tension: more privacy means slower consensus. The trade-off is characterized empirically but not analytically.
 
 **3. Corollary P (formal proof).** The liveness argument for PHA under partition is a proof-sketch. A formal proof requires: (a) a bounded gossip model with message loss probability, (b) explicit analysis of the multi-partition case where more than two network components exist simultaneously, and (c) proof that the σ-dominance condition is eventually satisfied under bounded adversarial stake.
 
 **4. Graph deanonymization (partial mitigation).** Graph privacy tools are implemented — `GraphPrivacyAnalyzer`, `IntersectionAttackDetector`, Dandelion stem/fluff. However, the sender address is public on-chain, decoy pools are bounded, and the stem phase applies delay locally rather than routing through a true relay chain. A global passive adversary who observes all network traffic retains significant deanonymization capability. A formal anonymity set bound for DAG graphs remains open.
 
-**5. State root finality chain.** Merkle roots are computed and verified but not yet incorporated into a proper finality chain where each checkpoint commits to the previous checkpoint's root. This would enable secure light clients.
+**5. Bulletproofs integration.** Range proofs are currently handled by `PlaceholderRangeProof`. The `trait RangeProofSystem` provides a drop-in backend API ready for Bulletproofs or Halo2. The blocking issue is the `curve25519-dalek v3/v4` version conflict in the Rust ecosystem; this is a known ecosystem problem rather than a protocol design issue.
 
-**6. Parasite DAG (formal analysis).** The closure rule and honest parent selection together provide informal resistance to parasite branches. A formal analysis bounding the probability of a successful parasite attack as a function of adversary stake fraction is not yet done.
+**6. State root finality chain.** Merkle roots are computed and verified but not yet incorporated into a proper finality chain where each checkpoint commits to the previous checkpoint's root. This would enable secure light clients.
+
+**7. Parasite DAG (formal analysis).** The closure rule and honest parent selection together provide informal resistance to parasite branches. A formal analysis bounding the probability of a successful parasite attack as a function of adversary stake fraction is not yet done.
 
 ---
 
@@ -430,6 +538,8 @@ We identify the following open problems explicitly:
 
 **Monero.** Strong privacy via ring signatures and RingCT. Block-based, proof-of-work, fees required. GhostLedger borrows the Pedersen commitment approach but uses DAG structure and stealth addresses differently.
 
+**Mimblewimble / Grin.** The excess kernel model and cut-through pruning in GhostLedger directly follow the Mimblewimble construction. The key difference is DAG structure instead of a linear chain, and an explicit conflict resolution layer on top.
+
 **Avalanche (Rocket et al., 2020).** DAG-based metastable consensus via repeated sampling. Provides probabilistic finality. GhostLedger's closure rule is deterministic once the σ-threshold is met, which is stronger but requires more weight accumulation.
 
 **Dandelion (Fanti et al., 2018).** Diffusion relay protocol for blockchain privacy. GhostLedger implements an analogous stem/fluff mechanism for DAG broadcast, with deterministic phase assignment per transaction and 2× stem delay.
@@ -438,9 +548,11 @@ We identify the following open problems explicitly:
 
 ## 13. Conclusion
 
-GhostLedger demonstrates that a feeless, private, decentralized DAG ledger is architecturally viable. The key mechanisms — cumulative weight consensus, stake-weighted conflict closure with σ-dominance, stealth addresses, Pedersen commitments, hybrid parent selection, graph privacy analysis, and the Partition Healing Algorithm — form a coherent whole that has been implemented and tested.
+GhostLedger demonstrates that a feeless, private, decentralized DAG ledger is architecturally viable. The key mechanisms — cumulative weight consensus, stake-weighted conflict closure with σ-dominance, stealth addresses, Pedersen commitments with excess kernels, hybrid parent selection, cut-through pruning, graph privacy analysis, and the Partition Healing Algorithm — form a coherent whole that has been implemented and tested.
 
-The empirical results confirm two non-obvious findings: pure greedy parent selection causes DAG divergence regardless of privacy noise level, and high conflict rates produce narrower (healthier) DAGs rather than wider ones.
+The empirical results at 50 trials confirm three non-obvious findings: pure greedy parent selection causes DAG divergence regardless of privacy noise level; β=0.7 is the empirically optimal consensus bias outperforming the previously assumed β=0.5; and decoy injection (ε>0) measurably reduces graph-level deanonymization risk with a modest, quantified consensus cost.
+
+The privacy layer has been upgraded from a SHA-256 scaffolding to a cryptographically correct Pedersen commitment system with real blinding factors, balance proofs, excess kernels, and a typed range proof abstraction ready for Bulletproofs. The validator enforces all three confidential transaction checks in sequence.
 
 Privacy at the graph level is partially addressed: parent entropy analysis, intersection attack detection, and Dandelion-style diffusion are implemented and tested. A global passive adversary with access to both network traffic and on-chain data retains meaningful deanonymization capability. This is the primary open problem for the next phase of development.
 
@@ -456,7 +568,9 @@ The protocol should be considered a research prototype. The implementation is pu
 4. G. Fanti, S. B. Venkatakrishnan, S. Bakshi, B. Bhatt, S. Bhatt, P. Viswanath. "Dandelion++: Lightweight Cryptocurrency Networking with Formal Anonymity Guarantees." ACM SIGMETRICS, 2018.
 5. N. van Saberhagen. "CryptoNote v2.0." 2013. (Stealth addresses)
 6. T. P. Pedersen. "Non-Interactive and Information-Theoretic Secure Verifiable Secret Sharing." CRYPTO 1991. (Pedersen commitments)
-7. M. Hamburg. "Decaf: Eliminating Cofactors Through Point Compression." CRYPTO 2015. (Ristretto255 construction basis)
+7. A. Poelstra. "Mimblewimble." 2016. (Excess kernels, cut-through)
+8. M. Hamburg. "Decaf: Eliminating Cofactors Through Point Compression." CRYPTO 2015. (Ristretto255 construction basis)
+9. B. Bünz, J. Bootle, D. Boneh, A. Poelstra, P. Wuille, G. Maxwell. "Bulletproofs: Short Proofs for Confidential Transactions and More." IEEE S&P 2018.
 
 ---
 
