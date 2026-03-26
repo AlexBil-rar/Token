@@ -74,7 +74,7 @@ pub async fn stem_transaction(
     }
     tx_with_ttl.stem_ttl -= 1;
 
-    let payload = match serde_json::to_value(tx) {
+    let payload = match serde_json::to_value(&tx_with_ttl) {
         Ok(v) => v,
         Err(e) => { warn!("Failed to serialize tx for stem: {}", e); return false; }
     };

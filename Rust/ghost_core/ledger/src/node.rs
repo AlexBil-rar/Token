@@ -196,6 +196,75 @@ impl Node {
         applied
     }
 
+    pub fn auto_adjust_privacy(&mut self) {
+        use crate::privacy::GraphPrivacyAnalyzer;
+
+        let tips = self.dag.get_tips();
+        if tips.is_empty() { return; }
+
+        let high_risk_addresses: Vec<String> = {
+            let all_senders: Vec<String> = self.dag.vertices.values()
+                .map(|tx| tx.sender.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+
+            all_senders.into_iter()
+                .filter(|addr| self.intersection_detector.is_high_risk(addr))
+                .collect()
+        };
+
+        let network_risk_high = !high_risk_addresses.is_empty();
+
+        let graph_vulnerable = tips.iter().any(|tip_id| {
+            if let Some(tx) = self.dag.get_transaction(tip_id) {
+                let parent_weights: Vec<u64> = tx.parents.iter()
+                    .filter_map(|pid| self.dag.get_transaction(pid).map(|p| p.weight))
+                    .collect();
+                let metrics = GraphPrivacyAnalyzer::analyze(
+                    &parent_weights,
+                    tips.len(),
+                    0,
+                    self.diffusion.delay_min_ms,
+                );
+                metrics.is_vulnerable()
+            } else {
+                false
+            }
+        });
+
+        if network_risk_high || graph_vulnerable {
+            if self.parent_policy.epsilon < 0.25 {
+                self.parent_policy.epsilon = (self.parent_policy.epsilon + 0.05).min(0.25);
+            }
+            if self.parent_policy.beta > 0.3 {
+                self.parent_policy.beta = (self.parent_policy.beta - 0.1).max(0.3);
+            }
+            if self.diffusion.delay_min_ms < 200 {
+                self.diffusion.delay_min_ms = (self.diffusion.delay_min_ms + 50).min(200);
+            }
+            if self.diffusion.delay_max_ms < 800 {
+                self.diffusion.delay_max_ms = (self.diffusion.delay_max_ms + 100).min(800);
+            }
+        } else {
+            let default = crate::privacy::DiffusionConfig::default();
+            let default_policy = crate::parent_selection::ParentSelectionPolicy::default();
+
+            if self.parent_policy.epsilon > default_policy.epsilon {
+                self.parent_policy.epsilon = (self.parent_policy.epsilon - 0.02).max(default_policy.epsilon);
+            }
+            if self.parent_policy.beta < default_policy.beta {
+                self.parent_policy.beta = (self.parent_policy.beta + 0.05).min(default_policy.beta);
+            }
+            if self.diffusion.delay_min_ms > default.delay_min_ms {
+                self.diffusion.delay_min_ms = (self.diffusion.delay_min_ms - 10).max(default.delay_min_ms);
+            }
+            if self.diffusion.delay_max_ms > default.delay_max_ms {
+                self.diffusion.delay_max_ms = (self.diffusion.delay_max_ms - 20).max(default.delay_max_ms);
+            }
+        }
+    }
+
     pub fn bootstrap_genesis(&mut self, address: &str, balance: u64) {
         self.state.credit(address, balance);
         self.update_state_root();
@@ -381,6 +450,7 @@ impl Node {
             h.update(nonce.to_le_bytes());
             h.update(wallet.address.as_bytes());
             tx.commitment = Some(hex::encode(h.finalize()));
+            tx.range_proof_status = Some("experimental".to_string());
         }
     
         self.mine_anti_spam(&mut tx);
@@ -444,7 +514,13 @@ impl Node {
         self.mempool.remove(&tx_id);
         self.anti_spam.record_transaction();
         self.try_apply_deferred();
-        self.decoy_pool.record(tx_id.clone());
+        let tx_weight = self.dag.get_transaction(&tx_id)
+            .map(|t| t.weight)
+            .unwrap_or(1);
+        let tx_timestamp = self.dag.get_transaction(&tx_id)
+            .map(|t| t.timestamp)
+            .unwrap_or(0);
+        self.decoy_pool.record_with_meta(tx_id.clone(), tx_weight, tx_timestamp);
 
         {
             use std::time::{SystemTime, UNIX_EPOCH};
@@ -471,6 +547,10 @@ impl Node {
                 .unwrap_or_default();
             if !sender.0.is_empty() {
                 self.conflict_resolver.register(&sender.0, sender.1, &tx_id);
+            }
+            let total = self.dag.vertices.len() as u64;
+            if total % 50 == 0 {
+                self.auto_adjust_privacy();
             }
             let stake_weights = self.stake_weights();
             let total_stake = self.total_stake();
@@ -525,7 +605,6 @@ impl Node {
 }
 
 #[cfg(test)]
-
 impl Node {
     pub fn new_for_test() -> Self {
         let mut node = Self::new();
@@ -533,6 +612,8 @@ impl Node {
         node
     }
 }
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -791,5 +872,40 @@ mod tests {
         node.diffusion = crate::privacy::DiffusionConfig::disabled();
         let delay = node.relay_delay("any_tx_id");
         assert_eq!(delay, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn test_auto_adjust_increases_epsilon_on_high_risk() {
+        let mut node = Node::new_for_test();
+        let default_epsilon = node.parent_policy.epsilon;
+
+        let parents = vec!["p1".to_string(), "p2".to_string()];
+        for i in 0..10 {
+            node.intersection_detector.record_observation(
+                "alice",
+                format!("tx{}", i),
+                i as u64 * 100,
+                parents.clone(),
+            );
+        }
+
+        node.auto_adjust_privacy();
+
+        assert!(
+            node.parent_policy.epsilon >= default_epsilon,
+            "epsilon"
+        );
+    }
+
+    #[test]
+    fn test_auto_adjust_no_change_on_low_risk() {
+        let mut node = Node::new_for_test();
+        let default_epsilon = node.parent_policy.epsilon;
+        let default_beta = node.parent_policy.beta;
+
+        node.auto_adjust_privacy();
+
+        assert_eq!(node.parent_policy.epsilon, default_epsilon);
+        assert_eq!(node.parent_policy.beta, default_beta);
     }
 }

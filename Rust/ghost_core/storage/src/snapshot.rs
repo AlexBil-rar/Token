@@ -187,12 +187,13 @@ mod tests {
 use ledger::node::NodeStake;
 
     fn tmp_path() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         std::env::temp_dir().join(format!(
-            "ghost_test_{}.json",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
+            "ghost_test_{}_{}.json",
+            std::process::id(),
+            id,
         ))
     }
 

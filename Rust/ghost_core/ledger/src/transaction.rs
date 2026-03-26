@@ -42,6 +42,7 @@ pub struct TransactionVertex {
     pub commitment: Option<String>,    
     pub balance_proof: Option<String>,
     pub stem_ttl: u8,
+    pub range_proof_status: Option<String>,
 }
 
 impl TransactionVertex {
@@ -72,6 +73,7 @@ impl TransactionVertex {
             commitment: None,
             balance_proof: None,
             stem_ttl: 0,
+            range_proof_status: None,
         }
     }
 

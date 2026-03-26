@@ -29,9 +29,16 @@ impl Default for ParentSelectionConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DecoyEntry {
+    pub tx_id: String,
+    pub weight: u64,
+    pub timestamp: u64,
+}
+
 #[derive(Debug)]
 pub struct DecoyPool {
-    recent: VecDeque<String>,
+    recent: VecDeque<DecoyEntry>,
     max_size: usize,
     seed: u64,
 }
@@ -46,34 +53,57 @@ impl DecoyPool {
     }
 
     pub fn record(&mut self, tx_id: String) {
+        self.record_with_meta(tx_id, 1, 0);
+    }
+
+    pub fn record_with_meta(&mut self, tx_id: String, weight: u64, timestamp: u64) {
         if self.recent.len() >= self.max_size {
             self.recent.pop_front();
         }
-        self.recent.push_back(tx_id);
+        self.recent.push_back(DecoyEntry { tx_id, weight, timestamp });
     }
 
     pub fn sample(&mut self, n: usize, exclude: &[String]) -> Vec<String> {
+        self.sample_matching(n, exclude, None, None)
+    }
+
+    pub fn sample_matching(
+        &mut self,
+        n: usize,
+        exclude: &[String],
+        target_weight: Option<u64>,
+        target_timestamp: Option<u64>,
+    ) -> Vec<String> {
         if self.recent.is_empty() || n == 0 {
             return vec![];
         }
 
-        let mut candidates: Vec<String> = self.recent.iter()
-            .filter(|id| !exclude.contains(id))
-            .cloned()
+        let mut candidates: Vec<&DecoyEntry> = self.recent.iter()
+            .filter(|e| !exclude.contains(&e.tx_id))
             .collect();
 
-        if candidates.is_empty() {
-            return vec![];
+        if candidates.is_empty() { return vec![]; }
+
+        if let (Some(tw), Some(tt)) = (target_weight, target_timestamp) {
+            candidates.sort_by_key(|e| {
+                let weight_diff = (e.weight as i64 - tw as i64).unsigned_abs();
+                let time_diff = (e.timestamp as i64 - tt as i64).unsigned_abs();
+                weight_diff * 10 + time_diff / 1000
+            });
+            let pool_size = (candidates.len()).min(n * 3).max(n);
+            candidates.truncate(pool_size);
         }
 
         let take = n.min(candidates.len());
-        for i in (1..candidates.len()).rev() {
+        let mut ids: Vec<String> = candidates.iter().map(|e| e.tx_id.clone()).collect();
+
+        for i in (1..ids.len()).rev() {
             self.seed = self.xorshift(self.seed);
             let j = (self.seed as usize) % (i + 1);
-            candidates.swap(i, j);
+            ids.swap(i, j);
         }
 
-        candidates.into_iter().take(take).collect()
+        ids.into_iter().take(take).collect()
     }
 
     pub fn size(&self) -> usize {
@@ -87,6 +117,7 @@ impl DecoyPool {
         x
     }
 }
+
 
 pub fn select_parents_with_privacy(
     tips: &[String],
@@ -258,7 +289,6 @@ impl GraphPrivacyMetrics {
             || self.timing_exposure > 0.7
     }
  
-    /// 0.0 = максимальная приватность, 1.0 = полностью открыт
     pub fn privacy_score(&self) -> f64 {
         let entropy_penalty = (1.0 - self.parent_entropy).max(0.0) * 0.35;
         let fanout_penalty  = self.fan_out_score * 0.30;
@@ -271,12 +301,6 @@ impl GraphPrivacyMetrics {
 pub struct GraphPrivacyAnalyzer;
  
 impl GraphPrivacyAnalyzer {
-    /// Анализирует транзакцию в контексте её родителей.
-    ///
-    /// `parent_weights`  — веса каждого из родителей tx
-    /// `total_dag_tips`  — сколько всего tips в DAG (для fan-out нормализации)
-    /// `decoy_count`     — сколько decoy parents у tx
-    /// `relay_delay_ms`  — фактическая задержка relay (из DiffusionConfig)
     pub fn analyze(
         parent_weights: &[u64],
         total_dag_tips: usize,
@@ -292,8 +316,6 @@ impl GraphPrivacyAnalyzer {
         GraphPrivacyMetrics { parent_entropy, fan_out_score, timing_exposure, decoy_ratio }
     }
  
-    /// Энтропия Шеннона по весам родителей, нормализована к [0,1].
-    /// Высокая → выбор родителей равномерен → атакующий не может предсказать.
     fn shannon_entropy(weights: &[u64]) -> f64 {
         if weights.is_empty() { return 0.0; }
         let total: u64 = weights.iter().sum();
@@ -308,14 +330,11 @@ impl GraphPrivacyAnalyzer {
         (entropy / max_entropy).clamp(0.0, 1.0)
     }
  
-    /// Насколько tx выделяется как hub по числу родителей относительно DAG.
     fn fan_out(parent_count: usize, total_tips: usize) -> f64 {
         if total_tips == 0 || parent_count == 0 { return 0.0; }
         (parent_count as f64 / total_tips.min(8) as f64).clamp(0.0, 1.0)
     }
  
-    /// Предсказуемость по времени. Оптимум ~200ms.
-    /// Отклонение в любую сторону увеличивает timing correlation risk.
     fn timing_exposure(delay_ms: u64) -> f64 {
         let optimal = 200.0f64;
         let dev = (delay_ms as f64 - optimal).abs();
@@ -336,7 +355,6 @@ struct AddressObservation {
 pub struct IntersectionAttackDetector {
     observations: std::collections::HashMap<String, std::collections::VecDeque<AddressObservation>>,
     window_size: usize,
-    /// Порог ритмичности (ms): транзакции с меньшим интервалом — подозрительны.
     regularity_threshold_ms: u64,
 }
  
@@ -363,11 +381,6 @@ impl IntersectionAttackDetector {
         queue.push_back(AddressObservation { tx_id, timestamp_ms, parent_ids });
     }
  
-    /// Риск intersection attack для адреса [0.0, 1.0].
-    ///
-    /// Высокий если:
-    /// 1. Транзакции ритмичны по времени (CV низкий)
-    /// 2. Родители сильно перекрываются между транзакциями (Jaccard высокий)
     pub fn intersection_risk(&self, address: &str) -> f64 {
         let obs = match self.observations.get(address) {
             Some(q) if q.len() >= 2 => q,
@@ -386,7 +399,6 @@ impl IntersectionAttackDetector {
         self.observations.get(address).map(|q| q.len()).unwrap_or(0)
     }
  
-    /// Оценивает ритмичность: низкий CV → ритмично → высокий риск.
     fn timing_regularity_risk(
         &self,
         obs: &std::collections::VecDeque<AddressObservation>,
@@ -407,7 +419,6 @@ impl IntersectionAttackDetector {
             / intervals.len() as f64;
  
         let cv = variance.sqrt() / mean;
-        // Низкий CV → ритмично
         let regularity_score = (1.0 - cv.min(2.0) / 2.0).clamp(0.0, 1.0);
  
         let threshold_proximity = if mean < self.regularity_threshold_ms as f64 {
@@ -419,7 +430,6 @@ impl IntersectionAttackDetector {
         (regularity_score * 0.7 + threshold_proximity * 0.3).clamp(0.0, 1.0)
     }
  
-    /// Средний Jaccard overlap между соседними наблюдениями по родителям.
     fn parent_overlap_risk(
         &self,
         obs: &std::collections::VecDeque<AddressObservation>,
@@ -448,15 +458,11 @@ impl IntersectionAttackDetector {
  
 #[derive(Debug, Clone, PartialEq)]
 pub enum DandelionPhase {
-    /// Stem: пересылаем одному peer, скрываем источник.
     Stem,
-    /// Fluff: стандартный gossip broadcast.
     Fluff,
 }
  
 impl DiffusionConfig {
-    /// Детерминированно определяет фазу для tx_id.
-    /// ~20% транзакций → Stem, ~80% → Fluff.
     pub fn dandelion_phase(&self, tx_id: &str) -> DandelionPhase {
         if !self.enabled { return DandelionPhase::Fluff; }
         let entropy = tx_id
@@ -465,7 +471,6 @@ impl DiffusionConfig {
             if entropy % 1024 < 205 { DandelionPhase::Stem } else { DandelionPhase::Fluff }
     }
  
-    /// Задержка в stem фазе — 2x длиннее обычного relay, размывает timing correlation.
     pub fn stem_delay(&self, tx_id: &str) -> std::time::Duration {
         if !self.enabled { return std::time::Duration::ZERO; }
         let entropy = tx_id
@@ -478,8 +483,6 @@ impl DiffusionConfig {
         std::time::Duration::from_millis(stem_min + (entropy % (range + 1)))
     }
  
-    /// Возвращает задержку с учётом Dandelion фазы.
-    /// Используй вместо `relay_delay()` в ws_server.rs.
     pub fn effective_delay(&self, tx_id: &str) -> std::time::Duration {
         match self.dandelion_phase(tx_id) {
             DandelionPhase::Stem  => self.stem_delay(tx_id),
@@ -842,4 +845,30 @@ mod tests {
         assert!(stem_count >= 100 && stem_count <= 300,
             "Stem ratio should be ~20%, got {}%", stem_count / 10);
     }
+
+    #[test]
+    fn test_decoy_pool_adaptive_prefers_similar_weight() {
+        let mut pool = DecoyPool::new(20);
+        for i in 0..5 {
+            pool.record_with_meta(format!("heavy_{}", i), 100, 1000);
+        }
+        for i in 0..5 {
+            pool.record_with_meta(format!("light_{}", i), 1, 1000);
+        }
+
+        let result = pool.sample_matching(3, &[], Some(100), None);
+        assert!(!result.is_empty());
+        let heavy_count = result.iter().filter(|id| id.starts_with("heavy")).count();
+        assert!(heavy_count >= result.len() / 2,
+            "adaptive target_weight=100");
+    }
+
+    #[test]
+    fn test_decoy_pool_record_with_meta() {
+        let mut pool = DecoyPool::new(10);
+        pool.record_with_meta("tx1".to_string(), 5, 1000);
+        assert_eq!(pool.size(), 1);
+        let result = pool.sample(1, &[]);
+        assert_eq!(result, vec!["tx1"]);
+}
 }

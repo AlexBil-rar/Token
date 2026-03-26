@@ -83,6 +83,13 @@ impl Validator {
                 &format!("insufficient balance: have {}, need {}", balance, tx.amount),
             );
         }
+        let current_nonce = state.nonces.get(&tx.sender).copied().unwrap_or(0);
+        if tx.nonce < current_nonce + 1 {
+            return ValidationResult::err(
+                "bad_nonce",
+                &format!("nonce too old: current={}, got={}", current_nonce, tx.nonce),
+            );
+        }
         ValidationResult::ok("ok", "balance ok")
     }
 
@@ -174,6 +181,15 @@ impl Validator {
                 "privacy_required",
                 "network is in privacy-by-default mode: commitment required",
             );
+        }
+        if tx.commitment.is_some() {
+            match tx.range_proof_status.as_deref() {
+                Some("verified") => {} // ok
+                Some("experimental") => {
+                }
+                _ => {
+                }
+            }
         }
     
         ValidationResult::ok("ok", "privacy check passed")
@@ -354,5 +370,29 @@ mod tests {
         let result = v.validate_anti_spam(&tx);
         assert!(!result.ok);
         assert_eq!(result.code, "bad_pow");
+    }
+    #[test]
+    fn test_state_readonly_rejects_old_nonce() {
+        let v = Validator::new();
+        let mut state = LedgerState::new();
+        state.credit("alice", 1000);
+        state.nonces.insert("alice".to_string(), 3); 
+
+        let mut tx = make_tx("alice", 100, 1); 
+        let result = v.validate_state_readonly(&tx, &state);
+        assert!(!result.ok);
+        assert_eq!(result.code, "bad_nonce");
+    }
+
+    #[test]
+    fn test_state_readonly_accepts_future_nonce() {
+        let v = Validator::new();
+        let mut state = LedgerState::new();
+        state.credit("alice", 1000);
+        state.nonces.insert("alice".to_string(), 3);
+
+        let tx = make_tx("alice", 100, 5);
+        let result = v.validate_state_readonly(&tx, &state);
+        assert!(result.ok);
     }
 }

@@ -71,8 +71,25 @@ pub fn select_parents(
 
     let consensus_count = selected.len();
 
+    let (target_weight, target_timestamp) = if !selected.is_empty() {
+        let weights: Vec<u64> = selected.iter()
+            .filter_map(|id| dag.get_transaction(id).map(|t| t.weight))
+            .collect();
+        let timestamps: Vec<u64> = selected.iter()
+            .filter_map(|id| dag.get_transaction(id).map(|t| t.timestamp))
+            .collect();
+        let avg_w = if weights.is_empty() { None }
+            else { Some(weights.iter().sum::<u64>() / weights.len() as u64) };
+        let avg_ts = if timestamps.is_empty() { None }
+            else { Some(timestamps.iter().sum::<u64>() / timestamps.len() as u64) };
+        (avg_w, avg_ts)
+    } else {
+        (None, None)
+    };
+
     let (final_parents, decoy_count) = apply_privacy_noise(
         selected, decoy_pool, policy.epsilon, policy.max_parents, rng_seed,
+        target_weight, target_timestamp,
     );
 
     SelectionResult {
@@ -206,6 +223,8 @@ fn apply_privacy_noise(
     epsilon: f64,
     max_parents: usize,
     seed: u64,
+    target_weight: Option<u64>,   
+    target_timestamp: Option<u64>, 
 ) -> (Vec<String>, usize) {
     if epsilon <= 0.0 || selected.is_empty() || decoy_pool.size() == 0 {
         return (selected, 0);
@@ -216,7 +235,7 @@ fn apply_privacy_noise(
         return (selected, 0);
     }
 
-    let decoys = decoy_pool.sample(1, &selected);
+    let decoys = decoy_pool.sample_matching(1, &selected, target_weight, target_timestamp);
     if decoys.is_empty() {
         return (selected, 0);
     }
