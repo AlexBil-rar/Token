@@ -8,8 +8,8 @@ from sim.dag import DAG, Tx
 
 @dataclass
 class Policy:
-    beta: float    # 0.0 = random, 1.0 = greedy
-    epsilon: float # 0.0 = no noise, 0.3 = 30% decoy chance
+    beta: float = 0.7
+    epsilon: float = 0.10
     max_parents: int = 2
 
 

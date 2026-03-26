@@ -42,7 +42,10 @@ pub struct TransactionVertex {
     pub commitment: Option<String>,    
     pub balance_proof: Option<String>,
     pub stem_ttl: u8,
-    pub range_proof_status: Option<String>,
+    pub range_proof_status: crypto::range_proof::RangeProofStatus,
+    pub range_proof: Option<String>,
+    pub excess_commitment: Option<String>,
+    pub excess_signature: Option<String>,
 }
 
 impl TransactionVertex {
@@ -73,7 +76,10 @@ impl TransactionVertex {
             commitment: None,
             balance_proof: None,
             stem_ttl: 0,
-            range_proof_status: None,
+            range_proof_status: crypto::range_proof::RangeProofStatus::Missing,
+            range_proof: None,
+            excess_commitment: None,
+            excess_signature: None,
         }
     }
 

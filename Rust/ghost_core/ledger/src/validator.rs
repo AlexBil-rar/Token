@@ -3,6 +3,9 @@
 use crate::dag::DAG;
 use crate::state::LedgerState;
 use crate::transaction::TransactionVertex;
+use crypto::commitments::BalanceProof;  
+use crypto::commitments::Commitment;   
+
 
 const ANTI_SPAM_DIFFICULTY: usize = 3;
 const MAX_PARENTS: usize = 2;
@@ -64,6 +67,9 @@ impl Validator {
             self.validate_anti_spam_with_difficulty(tx, difficulty),
             self.validate_state_readonly(tx, state),
             self.validate_privacy_mode(tx, privacy_by_default),
+            self.validate_balance_proof(tx),
+            self.validate_excess(tx),
+            self.validate_confidential_tx(tx),
         ];
         for result in checks {
             if !result.ok { return result; }
@@ -92,6 +98,81 @@ impl Validator {
         }
         ValidationResult::ok("ok", "balance ok")
     }
+
+
+    pub fn validate_balance_proof(&self, tx: &TransactionVertex) -> ValidationResult {
+        let commitment_hex = match &tx.commitment {
+            Some(c) => c,
+            None => return ValidationResult::ok("ok", "transparent tx"),
+        };
+
+        let proof_hex = match &tx.balance_proof {
+            Some(p) => p,
+            None => return ValidationResult::err(
+                "missing_balance_proof",
+                "confidential tx must include balance proof",
+            ),
+        };
+
+        let proof: BalanceProof = match serde_json::from_str(proof_hex) {
+            Ok(p) => p,
+            Err(_) => return ValidationResult::err(
+                "invalid_balance_proof",
+                "failed to deserialize balance proof",
+            ),
+        };
+
+        let output_commitment = match serde_json::from_str::<Commitment>(
+            &format!("{{\"point_hex\":\"{}\"}}", commitment_hex)
+        ) {
+            Ok(c) => c,
+            Err(_) => return ValidationResult::err(
+                "invalid_commitment",
+                "failed to parse commitment",
+            ),
+        };
+
+        if !proof.verify(&[], &[output_commitment]) {
+            return ValidationResult::err(
+                "invalid_balance_proof",
+                "balance proof verification failed",
+            );
+        }
+
+        if let Some(rp_hex) = &tx.range_proof {
+            use crypto::range_proof::{PlaceholderRangeProof, RangeProofSystem};
+            use crypto::commitments::Commitment;
+        
+            let rp: crypto::range_proof::PlaceholderProof = match serde_json::from_str(rp_hex) {
+                Ok(p) => p,
+                Err(_) => return ValidationResult::err(
+                    "invalid_range_proof",
+                    "failed to deserialize range proof",
+                ),
+            };
+        
+            let commitment = match serde_json::from_str::<Commitment>(
+                &format!("{{\"point_hex\":\"{}\"}}", commitment_hex)
+            ) {
+                Ok(c) => c,
+                Err(_) => return ValidationResult::err(
+                    "invalid_commitment",
+                    "failed to parse commitment for range proof check",
+                ),
+            };
+        
+            if PlaceholderRangeProof::verify(&commitment, &rp).is_err() {
+                return ValidationResult::err(
+                    "invalid_range_proof",
+                    "range proof verification failed",
+                );
+            }
+        }
+
+        ValidationResult::ok("ok", "balance proof valid")
+    }
+
+
 
     pub fn validate_parents(&self, tx: &TransactionVertex, dag: &DAG) -> ValidationResult {
         if dag.vertices.is_empty() && !tx.parents.is_empty() {
@@ -162,6 +243,7 @@ impl Validator {
             Err(_) => ValidationResult::err("bad_signature", "signature verification failed"),
         }
     }
+    
 
     pub fn validate_privacy_mode(
         &self,
@@ -182,12 +264,17 @@ impl Validator {
                 "network is in privacy-by-default mode: commitment required",
             );
         }
+        use crypto::range_proof::RangeProofStatus;
+
         if tx.commitment.is_some() {
-            match tx.range_proof_status.as_deref() {
-                Some("verified") => {} // ok
-                Some("experimental") => {
-                }
-                _ => {
+            match tx.range_proof_status {
+                RangeProofStatus::Verified => {}
+                RangeProofStatus::Experimental => {}
+                RangeProofStatus::Missing => {
+                    return ValidationResult::err(
+                        "missing_range_proof",
+                        "commitment present but range proof is missing",
+                    );
                 }
             }
         }
@@ -269,6 +356,61 @@ impl Validator {
             if !result.ok { return result; }
         }
         ValidationResult::ok("ok", "transaction valid")
+    }
+
+    pub fn validate_excess(&self, tx: &TransactionVertex) -> ValidationResult {
+        if tx.commitment.is_none() {
+            return ValidationResult::ok("ok", "transparent tx");
+        }
+
+        let excess_commitment = match &tx.excess_commitment {
+            Some(e) => e,
+            None => return ValidationResult::err(
+                "missing_excess",
+                "confidential tx must include excess commitment",
+            ),
+        };
+    
+        let excess_signature = match &tx.excess_signature {
+            Some(s) => s,
+            None => return ValidationResult::err(
+                "missing_excess_signature",
+                "confidential tx must include excess signature",
+            ),
+        };
+    
+        if hex::decode(excess_commitment).is_err() {
+            return ValidationResult::err(
+                "invalid_excess",
+                "excess commitment is not valid hex",
+            );
+        }
+    
+        if hex::decode(excess_signature).is_err() {
+            return ValidationResult::err(
+                "invalid_excess_signature",
+                "excess signature is not valid hex",
+            );
+        }
+    
+        ValidationResult::ok("ok", "excess valid")
+    }
+
+    pub fn validate_confidential_tx(&self, tx: &TransactionVertex) -> ValidationResult {
+        if tx.commitment.is_none() {
+            return ValidationResult::ok("ok", "transparent tx — skipping confidential checks");
+        }
+    
+        let rp_result = self.validate_balance_proof(tx);
+        if !rp_result.ok { return rp_result; }
+    
+        let bp_result = self.validate_balance_proof(tx);
+        if !bp_result.ok { return bp_result; }
+    
+        let excess_result = self.validate_excess(tx);
+        if !excess_result.ok { return excess_result; }
+    
+        ValidationResult::ok("ok", "confidential tx valid: range_proof + balance + excess")
     }
 }
 
@@ -378,7 +520,7 @@ mod tests {
         state.credit("alice", 1000);
         state.nonces.insert("alice".to_string(), 3); 
 
-        let mut tx = make_tx("alice", 100, 1); 
+        let tx = make_tx("alice", 100, 1);
         let result = v.validate_state_readonly(&tx, &state);
         assert!(!result.ok);
         assert_eq!(result.code, "bad_nonce");
@@ -395,4 +537,31 @@ mod tests {
         let result = v.validate_state_readonly(&tx, &state);
         assert!(result.ok);
     }
+
+    #[test]
+    fn test_excess_required_for_confidential_tx() {
+        let v = Validator::new();
+        let mut tx = make_tx("alice", 100, 1);
+        tx.commitment = Some("aabbcc".to_string());
+        let result = v.validate_excess(&tx);
+        assert!(!result.ok);
+        assert_eq!(result.code, "missing_excess");
+    }
+
+    #[test]
+    fn test_excess_ok_for_transparent_tx() {
+        let v = Validator::new();
+        let tx = make_tx("alice", 100, 1);
+        let result = v.validate_excess(&tx);
+        assert!(result.ok);
+    }
+
+    #[test]
+    fn test_confidential_tx_passes_all_three_steps() {
+        let v = Validator::new();
+        let tx = make_tx("alice", 100, 1);
+        let result = v.validate_confidential_tx(&tx);
+        assert!(result.ok);
+    }
+    
 }

@@ -11,7 +11,7 @@ use crate::pruner::Pruner;
 use crate::anti_spam::{AntiSpamController, RateLimitResult};
 use crate::merkle::{MerkleTree, StateCheckpoint};
 use crate::checkpoint::{CheckpointVertex, CheckpointRegistry};
-use crate::privacy::{DecoyPool, DiffusionConfig, GraphPrivacyAnalyzer, IntersectionAttackDetector, DandelionPhase};
+use crate::privacy::{DecoyPool, DiffusionConfig, IntersectionAttackDetector};
 use crate::parent_selection::{ParentSelectionPolicy, select_parents as policy_select};
 use token::staking::StakingManager;
 
@@ -444,15 +444,23 @@ impl Node {
         );
     
         if self.diffusion.privacy_by_default {
-            use sha2::{Sha256, Digest};
-            let mut h = Sha256::new();
-            h.update(amount.to_le_bytes());
-            h.update(nonce.to_le_bytes());
-            h.update(wallet.address.as_bytes());
-            tx.commitment = Some(hex::encode(h.finalize()));
-            tx.range_proof_status = Some("experimental".to_string());
+            use crypto::commitments::{Commitment, BlindingFactor, BalanceProof};
+            use crypto::range_proof::{PlaceholderRangeProof, RangeProofSystem};
+        
+            let blinding = BlindingFactor::random();
+            let commitment = Commitment::commit(amount, &blinding);
+            let proof = BalanceProof::create(&[blinding.clone()], &[]);
+        
+            let range_proof = PlaceholderRangeProof::prove(amount, &blinding, &commitment).unwrap();
+        
+            tx.commitment = Some(commitment.point_hex.clone());
+            tx.balance_proof = Some(serde_json::to_string(&proof).unwrap());
+            tx.excess_commitment = Some(proof.excess_commitment_hex.clone());
+            tx.excess_signature = Some(proof.excess_signature_hex.clone());
+            tx.range_proof = Some(serde_json::to_string(&range_proof).unwrap());
+            tx.range_proof_status = crypto::range_proof::RangeProofStatus::Experimental;
         }
-    
+
         self.mine_anti_spam(&mut tx);
         tx.signature = sign_fn(&tx.signing_payload());
         tx.finalize();

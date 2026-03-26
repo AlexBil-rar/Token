@@ -11,7 +11,7 @@ from sim.parent_selection import Policy, select_parents
 from sim.conflict_resolver import compute_losers, try_resolve
 from sim.metrics import TrialMetrics
 
-SWEET_SPOT = Policy(beta=0.5, epsilon=0.10)
+SWEET_SPOT = Policy(beta=0.7, epsilon=0.10)
 
 N_NODES       = 6
 N_TRIALS      = 10

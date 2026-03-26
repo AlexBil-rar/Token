@@ -456,7 +456,7 @@ mod tests {
             "root1".into(), String::new(), 1, 500, 2, "node".into(), vec![],
         );
         cp1.weight = CHECKPOINT_MIN_WEIGHT;
-        let cp1_id = cp1.checkpoint_id.clone();
+        let _cp1_id = cp1.checkpoint_id.clone();
         reg.register(cp1);
     
         let mut cp2 = CheckpointVertex::new(

@@ -1,12 +1,22 @@
 // crypto/src/range_proof.rs
 
 use serde::{Deserialize, Serialize};
+use crate::commitments::{Commitment, BlindingFactor};
 
 pub trait RangeProofSystem {
     type Proof: Serialize + for<'de> Deserialize<'de> + Clone;
 
-    fn prove(amount: u64) -> Result<(String, Self::Proof), RangeProofError>;
-    fn verify(commitment_hex: &str, proof: &Self::Proof) -> Result<(), RangeProofError>;
+    fn prove(
+        amount: u64,
+        blinding: &BlindingFactor,
+        commitment: &Commitment,
+    ) -> Result<Self::Proof, RangeProofError>;
+
+    fn verify(
+        commitment: &Commitment,
+        proof: &Self::Proof,
+    ) -> Result<(), RangeProofError>;
+
     fn is_production_safe() -> bool;
 }
 
@@ -38,23 +48,27 @@ pub struct PlaceholderRangeProof;
 impl RangeProofSystem for PlaceholderRangeProof {
     type Proof = PlaceholderProof;
 
-    fn prove(amount: u64) -> Result<(String, PlaceholderProof), RangeProofError> {
-        let commitment_hex = format!("{:016x}", amount);
-        Ok((commitment_hex, PlaceholderProof {
+    fn prove(
+        amount: u64,
+        _blinding: &BlindingFactor,
+        _commitment: &Commitment,
+    ) -> Result<PlaceholderProof, RangeProofError> {
+        Ok(PlaceholderProof {
             amount_bits: 64,
             experimental: true,
-        }))
+        })
     }
 
-    fn verify(commitment_hex: &str, proof: &PlaceholderProof) -> Result<(), RangeProofError> {
+    fn verify(
+        _commitment: &Commitment,
+        proof: &PlaceholderProof,
+    ) -> Result<(), RangeProofError> {
         if !proof.experimental {
             return Err(RangeProofError::InvalidProof(
                 "non-experimental proof not supported".into()
             ));
         }
-        u64::from_str_radix(commitment_hex, 16)
-            .map(|_| ())
-            .map_err(|e| RangeProofError::InvalidCommitment(e.to_string()))
+        Ok(())
     }
 
     fn is_production_safe() -> bool {
@@ -78,10 +92,18 @@ impl RangeProofStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commitments::{Commitment, BlindingFactor};
+
+    fn make_commitment(amount: u64) -> (BlindingFactor, Commitment) {
+        let blinding = BlindingFactor::random();
+        let commitment = Commitment::commit(amount, &blinding);
+        (blinding, commitment)
+    }
 
     #[test]
     fn test_placeholder_prove_and_verify() {
-        let (commitment, proof) = PlaceholderRangeProof::prove(1000).unwrap();
+        let (blinding, commitment) = make_commitment(1000);
+        let proof = PlaceholderRangeProof::prove(1000, &blinding, &commitment).unwrap();
         assert!(PlaceholderRangeProof::verify(&commitment, &proof).is_ok());
     }
 
@@ -92,26 +114,22 @@ mod tests {
 
     #[test]
     fn test_placeholder_proof_is_experimental() {
-        let (_, proof) = PlaceholderRangeProof::prove(42).unwrap();
+        let (blinding, commitment) = make_commitment(42);
+        let proof = PlaceholderRangeProof::prove(42, &blinding, &commitment).unwrap();
         assert!(proof.experimental);
     }
 
     #[test]
-    fn test_invalid_commitment_fails_verify() {
-        let (_, proof) = PlaceholderRangeProof::prove(100).unwrap();
-        let result = PlaceholderRangeProof::verify("not_hex_at_all!!", &proof);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_zero_amount_valid() {
-        let (commitment, proof) = PlaceholderRangeProof::prove(0).unwrap();
+        let (blinding, commitment) = make_commitment(0);
+        let proof = PlaceholderRangeProof::prove(0, &blinding, &commitment).unwrap();
         assert!(PlaceholderRangeProof::verify(&commitment, &proof).is_ok());
     }
 
     #[test]
     fn test_max_amount_valid() {
-        let (commitment, proof) = PlaceholderRangeProof::prove(u64::MAX).unwrap();
+        let (blinding, commitment) = make_commitment(u64::MAX);
+        let proof = PlaceholderRangeProof::prove(u64::MAX, &blinding, &commitment).unwrap();
         assert!(PlaceholderRangeProof::verify(&commitment, &proof).is_ok());
     }
 }

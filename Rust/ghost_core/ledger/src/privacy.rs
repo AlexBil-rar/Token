@@ -77,32 +77,31 @@ impl DecoyPool {
         if self.recent.is_empty() || n == 0 {
             return vec![];
         }
-
+    
         let mut candidates: Vec<&DecoyEntry> = self.recent.iter()
             .filter(|e| !exclude.contains(&e.tx_id))
             .collect();
-
+    
         if candidates.is_empty() { return vec![]; }
-
-        if let (Some(tw), Some(tt)) = (target_weight, target_timestamp) {
+    
+        if target_weight.is_some() || target_timestamp.is_some() {
+            let tw = target_weight.unwrap_or(0);
+            let tt = target_timestamp.unwrap_or(0);
             candidates.sort_by_key(|e| {
                 let weight_diff = (e.weight as i64 - tw as i64).unsigned_abs();
                 let time_diff = (e.timestamp as i64 - tt as i64).unsigned_abs();
                 weight_diff * 10 + time_diff / 1000
             });
-            let pool_size = (candidates.len()).min(n * 3).max(n);
-            candidates.truncate(pool_size);
+            return candidates.iter().take(n).map(|e| e.tx_id.clone()).collect();
         }
-
+    
         let take = n.min(candidates.len());
         let mut ids: Vec<String> = candidates.iter().map(|e| e.tx_id.clone()).collect();
-
         for i in (1..ids.len()).rev() {
             self.seed = self.xorshift(self.seed);
             let j = (self.seed as usize) % (i + 1);
             ids.swap(i, j);
         }
-
         ids.into_iter().take(take).collect()
     }
 

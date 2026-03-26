@@ -16,11 +16,11 @@ from sim.metrics import TrialMetrics
 N_NODES         = 6
 N_TX            = 150
 CONFLICT_EVERY  = 30
-N_TRIALS        = 10
+N_TRIALS        = 50
 DECOY_POOL_MAX  = 30
 
 BETA_VALUES    = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0]
-EPSILON_VALUES = [0.0, 0.05, 0.10, 0.20, 0.30]
+EPSILON_VALUES = [0.0, 0.05, 0.10, 0.15, 0.20, 0.30]
 
 
 # ── Single trial ──────────────────────────────────────────────────────────────
@@ -77,6 +77,7 @@ def run_trial(policy: Policy, seed: int) -> TrialMetrics:
         for node_id in range(N_NODES):
             tx_counter += 1
             metrics.record_selection(node_decoys[node_id])
+            metrics.record_parents(node_parents[node_id])
 
             tx = Tx(
                 tx_id=f"t{tx_counter}",
@@ -112,6 +113,9 @@ class AggResult:
     closure_rate: float
     mean_dag_width: float
     decoy_rate: float
+    parent_diversity: float   
+    graph_entropy: float    
+    origin_recovery_risk: float 
 
 
 def aggregate(trials: list[TrialMetrics]) -> AggResult:
@@ -126,6 +130,10 @@ def aggregate(trials: list[TrialMetrics]) -> AggResult:
         closure_rate=avg([t.closure_rate for t in trials]),
         mean_dag_width=avg([t.mean_dag_width for t in trials]),
         decoy_rate=avg([t.decoy_rate for t in trials]),
+        parent_diversity=avg([t.parent_diversity for t in trials]),   
+        graph_entropy=avg([t.graph_entropy for t in trials]),         
+        origin_recovery_risk=avg([t.origin_recovery_risk for t in trials]), 
+
     )
 
 
@@ -159,13 +167,15 @@ HEADER = ["beta", "epsilon", "median_closure", "p90_closure",
 def print_table(results: list[AggResult]):
     print()
     print(f"{'β':>4}  {'ε':>5}  {'median_cls':>10}  {'p90_cls':>8}  "
-          f"{'close_rate':>10}  {'dag_width':>9}  {'decoy_rt':>8}")
-    print("-" * 70)
+          f"{'close_rate':>10}  {'dag_width':>9}  {'decoy_rt':>8}  "
+          f"{'p_divers':>8}  {'entropy':>7}  {'orig_risk':>9}")
+    print("-" * 95)
     for r in results:
-        inf_str = lambda v: "  ∞" if v == float('inf') else f"{v:10.1f}"
+        inf_str = lambda v: "         ∞" if v == float('inf') else f"{v:10.1f}"
         print(f"{r.beta:4.1f}  {r.epsilon:5.2f}  {inf_str(r.median_closure)}  "
               f"{inf_str(r.p90_closure):>8}  "
-              f"{r.closure_rate:10.3f}  {r.mean_dag_width:9.1f}  {r.decoy_rate:8.3f}")
+              f"{r.closure_rate:10.3f}  {r.mean_dag_width:9.1f}  {r.decoy_rate:8.3f}  "
+              f"{r.parent_diversity:8.3f}  {r.graph_entropy:7.3f}  {r.origin_recovery_risk:9.3f}")
 
 
 def write_csv(results: list[AggResult], path: str):
