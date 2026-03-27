@@ -5,6 +5,7 @@ use crate::state::LedgerState;
 use crate::transaction::TransactionVertex;
 use crypto::commitments::BalanceProof;  
 use crypto::commitments::Commitment;   
+use crypto::range_proof::{RangeProofSystem, RangeProofStatus};
 
 
 const ANTI_SPAM_DIFFICULTY: usize = 3;
@@ -412,6 +413,51 @@ impl Validator {
     
         ValidationResult::ok("ok", "confidential tx valid: range_proof + balance + excess")
     }
+
+    pub fn validate_range_proof_with_backend<P: RangeProofSystem>(
+        &self,
+        tx: &TransactionVertex,
+    ) -> ValidationResult
+    where
+        P::Proof: for<'de> serde::Deserialize<'de>,
+    {
+        let commitment_hex = match &tx.commitment {
+            Some(c) => c,
+            None => return ValidationResult::ok("ok", "transparent tx"),
+        };
+    
+        let proof_hex = match &tx.range_proof {
+            Some(p) => p,
+            None => return ValidationResult::err(
+                "missing_range_proof",
+                "confidential tx must include range proof",
+            ),
+        };
+    
+        let proof: P::Proof = match serde_json::from_str(proof_hex) {
+            Ok(p) => p,
+            Err(_) => return ValidationResult::err(
+                "invalid_range_proof",
+                "failed to deserialize range proof",
+            ),
+        };
+    
+        let commitment = match serde_json::from_str::<crypto::commitments::Commitment>(
+            &format!("{{\"point_hex\":\"{}\"}}", commitment_hex)
+        ) {
+            Ok(c) => c,
+            Err(_) => return ValidationResult::err(
+                "invalid_commitment",
+                "failed to parse commitment",
+            ),
+        };
+    
+        match P::verify(&commitment, &proof) {
+            Ok(()) => ValidationResult::ok("ok", "range proof valid"),
+            Err(e) => ValidationResult::err("invalid_range_proof", &e.to_string()),
+        }
+    }
+    
 }
 
 #[cfg(test)]

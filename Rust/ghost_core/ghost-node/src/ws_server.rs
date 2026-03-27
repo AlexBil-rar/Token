@@ -13,6 +13,9 @@ use ledger::transaction::TransactionVertex;
 use network::peer_list::PeerList;
 use network::ws_message::{WsMessage, MessageType};
 use consensus::conflict_resolver::{ConflictResolver, CheckpointAnchor};
+use ghost_bulletproofs::BulletproofsBackend;
+use ghost_bulletproofs::BulletproofsBackend;
+use crypto::range_proof::RangeProofSystem;
 
 use crate::gossip;
 
@@ -223,6 +226,19 @@ async fn handle_transaction(
         n.submit_transaction(tx)
     };
 
+    if tx_clone.commitment.is_some() && tx_clone.range_proof.is_some() {
+        let validator = ledger::validator::Validator::new();
+        let rp_result = validator
+            .validate_range_proof_with_backend::<BulletproofsBackend>(&tx_clone);
+        if !rp_result.ok {
+            return Some(serde_json::json!({
+                "ok": false,
+                "code": rp_result.code,
+                "reason": rp_result.reason,
+            }).to_string());
+        }
+    }
+
     if result.ok {
         info!("Transaction accepted: {}...", tx_id_short);
     
@@ -244,6 +260,19 @@ async fn handle_transaction(
         gossip::dandelion_broadcast(&tx_clone, Arc::clone(peers), None, phase).await;
     } else {
         debug!("Transaction rejected: {} — {}", tx_id_short, result.reason);
+    }
+
+    if tx_clone.commitment.is_some() {
+        let validator = ledger::validator::Validator::new();
+        let rp_result = validator
+            .validate_range_proof_with_backend::<BulletproofsBackend>(&tx_clone);
+        if !rp_result.ok {
+            return Some(serde_json::json!({
+                "ok": false,
+                "code": rp_result.code,
+                "reason": rp_result.reason,
+            }).to_string());
+        }
     }
 
     Some(serde_json::json!({

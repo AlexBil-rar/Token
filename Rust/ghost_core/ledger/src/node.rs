@@ -445,20 +445,27 @@ impl Node {
     
         if self.diffusion.privacy_by_default {
             use crypto::commitments::{Commitment, BlindingFactor, BalanceProof};
-            use crypto::range_proof::{PlaceholderRangeProof, RangeProofSystem};
-        
+    
             let blinding = BlindingFactor::random();
             let commitment = Commitment::commit(amount, &blinding);
             let proof = BalanceProof::create(&[blinding.clone()], &[]);
-        
-            let range_proof = PlaceholderRangeProof::prove(amount, &blinding, &commitment).unwrap();
-        
+    
             tx.commitment = Some(commitment.point_hex.clone());
             tx.balance_proof = Some(serde_json::to_string(&proof).unwrap());
             tx.excess_commitment = Some(proof.excess_commitment_hex.clone());
             tx.excess_signature = Some(proof.excess_signature_hex.clone());
-            tx.range_proof = Some(serde_json::to_string(&range_proof).unwrap());
-            tx.range_proof_status = crypto::range_proof::RangeProofStatus::Experimental;
+    
+            if let Some(ref prove_fn) = range_proof_fn {
+                if let Some(rp_json) = prove_fn(amount, &blinding, &commitment) {
+                    tx.range_proof = Some(rp_json);
+                    tx.range_proof_status = crypto::range_proof::RangeProofStatus::Verified;
+                }
+            } else {
+                use crypto::range_proof::{PlaceholderRangeProof, RangeProofSystem};
+                let rp = PlaceholderRangeProof::prove(amount, &blinding, &commitment).unwrap();
+                tx.range_proof = Some(serde_json::to_string(&rp).unwrap());
+                tx.range_proof_status = crypto::range_proof::RangeProofStatus::Experimental;
+            }
         }
 
         self.mine_anti_spam(&mut tx);

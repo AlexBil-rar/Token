@@ -1,0 +1,13 @@
+[package]
+name = "ghost-bulletproofs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bulletproofs = "4.0"
+merlin = "3"
+curve25519-dalek-ng = "4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+hex = "0.4"
+crypto = { path = "../crypto" }

@@ -9,5 +9,6 @@ members = [
     "network", 
     "ghost-node", 
     "ghost-explorer",
+    "ghost-bulletproofs",
 ]
 resolver = "2"
