@@ -59,15 +59,28 @@ impl PeerList {
 
     pub fn add(&mut self, address: &str) -> bool {
         let address = address.trim_end_matches('/').to_string();
-
+    
         if self.peers.contains_key(&address) {
-            return true; 
+            return true;
         }
-
+    
         if self.peers.len() >= MAX_PEERS {
             return false;
         }
-
+    
+        if let Some(subnet) = extract_subnet(&address) {
+            let total = self.peers.len();
+            if total >= 5 {
+                let same_subnet = self.peers.keys()
+                    .filter(|addr| extract_subnet(addr).as_deref() == Some(&subnet))
+                    .count();
+                let ratio_after = (same_subnet + 1) as f64 / (total + 1) as f64;
+                if ratio_after > 0.60 {
+                    return false;
+                }
+            }
+        }
+    
         self.peers.insert(address.clone(), PeerEntry::new(address));
         true
     }
@@ -166,6 +179,21 @@ impl PeerList {
         EclipseCheck::Clean
     }
 
+    pub fn rotate_eclipse_peers(&mut self) -> usize {
+        if let EclipseCheck::Suspected { subnet, count, .. } = self.check_eclipse() {
+            let to_drop: Vec<String> = self.peers.keys()
+                .filter(|addr| extract_subnet(addr).as_deref() == Some(&subnet))
+                .take(count / 2)
+                .cloned()
+                .collect();
+            for addr in &to_drop {
+                self.peers.remove(addr);
+            }
+            return to_drop.len();
+        }
+        0
+    }
+
     pub fn freshest_peers(&self, n: usize) -> Vec<String> {
         let mut entries: Vec<&PeerEntry> = self.peers.values().collect();
         entries.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
@@ -250,13 +278,22 @@ mod tests {
     #[test]
     fn test_max_peers_limit() {
         let mut peers = PeerList::new();
-        for i in 0..MAX_PEERS {
-            let addr = format!("ws://10.0.{}.{}:9000", i / 256, i % 256);
-            assert!(peers.add(&addr));
+        let mut added = 0;
+        let mut i = 0u32;
+        while added < MAX_PEERS {
+            let a = (i / (256 * 256)) % 256;
+            let b = (i / 256) % 256;
+            let c = i % 256;
+            let addr = format!("ws://{}.{}.{}.1:9000", a + 1, b, c);
+            if peers.add(&addr) {
+                added += 1;
+            }
+            i += 1;
+            if i > 100_000 { break; }
         }
-        let result = peers.add("ws://99.99.99.99:9000");
-        assert!(!result);
         assert_eq!(peers.size(), MAX_PEERS);
+        let result = peers.add("ws://200.200.200.200:9000");
+        assert!(!result);
     }
 
     #[test]
@@ -325,7 +362,8 @@ mod tests {
     fn test_eclipse_detected_same_subnet() {
         let mut peers = PeerList::new();
         for i in 0..10 {
-            peers.add(&format!("ws://10.0.0.{}:9000", i + 1));
+            let addr = format!("ws://10.0.0.{}:9000", i + 1);
+            peers.peers.insert(addr.clone(), PeerEntry::new(addr));
         }
         let result = peers.check_eclipse();
         assert!(matches!(result, EclipseCheck::Suspected { .. }));
@@ -361,10 +399,31 @@ mod tests {
         let mut peers = PeerList::new();
         peers.add("ws://1.0.0.1:9000");
         peers.add("ws://1.0.0.2:9000");
-        // Напрямую выставляем last_seen чтобы не зависеть от sleep
         peers.peers.get_mut("ws://1.0.0.1:9000").unwrap().last_seen = 1000;
         peers.peers.get_mut("ws://1.0.0.2:9000").unwrap().last_seen = 2000;
         let fresh = peers.freshest_peers(1);
         assert_eq!(fresh[0], "ws://1.0.0.2:9000");
     }
+
+    #[test]
+fn test_hard_subnet_diversity_enforced() {
+    let mut peers = PeerList::new();
+    for i in 1..=5 {
+        peers.add(&format!("ws://10.0.0.{}:9000", i));
+    }
+    let result = peers.add("ws://10.0.0.100:9000");
+    assert!(!result, "6th peer from same /16 subnet should be rejected");
+}
+
+#[test]
+fn test_rotate_eclipse_peers() {
+    let mut peers = PeerList::new();
+    for i in 1..=10 {
+        let addr = format!("ws://10.0.0.{}:9000", i);
+        peers.peers.insert(addr.clone(), PeerEntry::new(addr));
+    }
+    let dropped = peers.rotate_eclipse_peers();
+    assert!(dropped > 0, "should drop some eclipse peers");
+    assert!(peers.size() < 10);
+}
 }

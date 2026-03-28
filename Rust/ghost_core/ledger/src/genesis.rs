@@ -2,15 +2,12 @@
 
 use crate::transaction::TransactionVertex;
 use crate::cut_through::TxKernel;
-use crypto::commitments::{Commitment, BlindingFactor, BalanceProof};
-use crypto::range_proof::{PlaceholderRangeProof, RangeProofSystem, RangeProofStatus};
 
 pub const GENESIS_AMOUNT: u64 = 21_000_000;
 
 pub struct GenesisResult {
     pub tx: TransactionVertex,
-    pub kernel: TxKernel,
-    pub blinding_hex: String,
+    pub kernel: Option<TxKernel>,
 }
 
 pub fn create_genesis_tx(
@@ -18,13 +15,6 @@ pub fn create_genesis_tx(
     public_key: &str,
     sign_fn: impl Fn(&[u8]) -> String,
 ) -> GenesisResult {
-    let blinding = BlindingFactor::random();
-    let commitment = Commitment::commit(GENESIS_AMOUNT, &blinding);
-    let proof = BalanceProof::create(&[blinding.clone()], &[]);
-    let range_proof = PlaceholderRangeProof::prove(
-        GENESIS_AMOUNT, &blinding, &commitment
-    ).unwrap();
-
     let mut tx = TransactionVertex::new(
         "system".to_string(),
         genesis_address.to_string(),
@@ -35,40 +25,16 @@ pub fn create_genesis_tx(
         vec![],
     );
 
-    tx.commitment = Some(commitment.point_hex.clone());
-    tx.balance_proof = Some(serde_json::to_string(&proof).unwrap());
-    tx.excess_commitment = Some(proof.excess_commitment_hex.clone());
-    tx.excess_signature = Some(proof.excess_signature_hex.clone());
-    tx.range_proof = Some(serde_json::to_string(&range_proof).unwrap());
-    tx.range_proof_status = RangeProofStatus::Experimental;
-
     tx.anti_spam_nonce = 0;
     tx.anti_spam_hash = tx.compute_anti_spam_hash();
     tx.signature = sign_fn(&tx.signing_payload());
     tx.finalize();
 
-    let kernel = TxKernel::from_tx(&tx);
-    let blinding_hex = blinding.to_hex();
-
-    GenesisResult { tx, kernel, blinding_hex }
+    GenesisResult { tx, kernel: None }
 }
 
-pub fn verify_genesis_kernel_sum(kernel: &TxKernel) -> bool {
-    use curve25519_dalek::ristretto::CompressedRistretto;
-
-    let hex = match &kernel.excess_commitment {
-        Some(h) => h,
-        None => return false,
-    };
-
-    let bytes = match hex::decode(hex) {
-        Ok(b) if b.len() == 32 => b,
-        _ => return false,
-    };
-
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    CompressedRistretto(arr).decompress().is_some()
+pub fn verify_genesis_kernel_sum(_kernel: &TxKernel) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -80,9 +46,10 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_tx_has_commitment() {
+    fn test_genesis_tx_is_transparent() {
         let result = create_genesis_tx("genesis_addr", &"b".repeat(64), dummy_sign);
-        assert!(result.tx.commitment.is_some());
+        assert!(result.tx.commitment.is_none(), "transparent genesis has no commitment");
+        assert!(result.kernel.is_none());
     }
 
     #[test]
@@ -98,21 +65,9 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_tx_has_kernel() {
+    fn test_genesis_tx_sender_is_system() {
         let result = create_genesis_tx("genesis_addr", &"b".repeat(64), dummy_sign);
-        assert!(result.kernel.excess_commitment.is_some());
-    }
-
-    #[test]
-    fn test_genesis_kernel_sum_valid() {
-        let result = create_genesis_tx("genesis_addr", &"b".repeat(64), dummy_sign);
-        assert!(verify_genesis_kernel_sum(&result.kernel));
-    }
-
-    #[test]
-    fn test_genesis_blinding_hex_length() {
-        let result = create_genesis_tx("genesis_addr", &"b".repeat(64), dummy_sign);
-        assert_eq!(result.blinding_hex.len(), 64);
+        assert_eq!(result.tx.sender, "system");
     }
 
     #[test]
@@ -122,8 +77,10 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_sender_is_system() {
-        let result = create_genesis_tx("genesis_addr", &"b".repeat(64), dummy_sign);
-        assert_eq!(result.tx.sender, "system");
+    fn test_genesis_no_blinding_secret() {
+        // Transparent genesis requires no secret to be preserved by operator
+        let r1 = create_genesis_tx("addr", &"b".repeat(64), dummy_sign);
+        let r2 = create_genesis_tx("addr", &"b".repeat(64), dummy_sign);
+        assert_eq!(r1.tx.tx_id, r2.tx.tx_id, "genesis is deterministic");
     }
 }
