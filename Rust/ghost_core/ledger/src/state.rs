@@ -2,12 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 use crate::transaction::TransactionVertex;
+use crate::cut_through::TxKernel;
 
 #[derive(Debug, Clone, Default)]
 pub struct LedgerState {
     pub balances: HashMap<String, u64>,
     pub nonces: HashMap<String, u64>,
     pub applied_txs: HashSet<String>,
+    pub kernel_set: Vec<TxKernel>,
 }
 
 impl LedgerState {
@@ -75,6 +77,20 @@ impl LedgerState {
         self.applied_txs.insert(tx.tx_id.clone());
     
         Ok(())
+    }
+
+    pub fn add_kernel(&mut self, kernel: TxKernel) {
+        if !self.kernel_set.iter().any(|k| k.tx_id == kernel.tx_id) {
+            self.kernel_set.push(kernel);
+        }
+    }
+    
+    pub fn has_kernel(&self, tx_id: &str) -> bool {
+        self.kernel_set.iter().any(|k| k.tx_id == tx_id)
+    }
+    
+    pub fn kernel_count(&self) -> usize {
+        self.kernel_set.len()
     }
 }
 

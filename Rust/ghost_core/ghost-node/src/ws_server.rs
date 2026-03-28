@@ -14,7 +14,6 @@ use network::peer_list::PeerList;
 use network::ws_message::{WsMessage, MessageType};
 use consensus::conflict_resolver::{ConflictResolver, CheckpointAnchor};
 use ghost_bulletproofs::BulletproofsBackend;
-use ghost_bulletproofs::BulletproofsBackend;
 use crypto::range_proof::RangeProofSystem;
 
 use crate::gossip;

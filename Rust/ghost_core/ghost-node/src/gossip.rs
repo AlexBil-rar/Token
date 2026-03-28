@@ -56,8 +56,17 @@ pub async fn stem_transaction(
 
     let entropy = tx.tx_id
         .bytes()
-        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-    let idx = (entropy as usize) % candidates.len();
+        .enumerate()
+        .fold(0u64, |acc, (i, b)| {
+            acc.wrapping_add((b as u64).wrapping_mul(i as u64 + 31))
+        });
+    
+    let time_component = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() / 10;
+
+    let idx = ((entropy ^ time_component) as usize) % candidates.len();
     let stem_peer = &candidates[idx];
 
     const STEM_MAX_TTL: u8 = 10;
@@ -83,7 +92,8 @@ pub async fn stem_transaction(
     let json = msg.to_json();
     let peer = stem_peer.clone();
 
-    debug!("Dandelion stem: tx {}... → {}", &tx.tx_id[..8.min(tx.tx_id.len())], peer);
+    debug!("Dandelion stem: tx {}... → {} (TTL={})",
+        &tx.tx_id[..8.min(tx.tx_id.len())], peer, tx_with_ttl.stem_ttl);
 
     tokio::spawn(async move {
         send_to_peer(&peer, &json).await;

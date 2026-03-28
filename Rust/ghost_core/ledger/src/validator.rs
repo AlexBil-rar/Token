@@ -270,7 +270,13 @@ impl Validator {
         if tx.commitment.is_some() {
             match tx.range_proof_status {
                 RangeProofStatus::Verified => {}
-                RangeProofStatus::Experimental => {}
+                RangeProofStatus::Experimental => {
+                    #[cfg(not(debug_assertions))]
+                    return ValidationResult::err(
+                        "experimental_range_proof",
+                        "production mode requires Verified range proof",
+                    );
+                }
                 RangeProofStatus::Missing => {
                     return ValidationResult::err(
                         "missing_range_proof",

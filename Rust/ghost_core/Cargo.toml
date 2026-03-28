@@ -5,10 +5,12 @@ members = [
     "consensus",
     "storage",
     "token",
-    "branches", 
-    "network", 
-    "ghost-node", 
+    "branches",
+    "network",
+    "ghost-node",
     "ghost-explorer",
     "ghost-bulletproofs",
+    "ghost-params",
+    "ghost-wire",
 ]
 resolver = "2"

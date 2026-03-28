@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use crate::dag::DAG;
 use crate::transaction::TransactionVertex;
+use crypto::commitments::{Commitment, BlindingFactor};
+
 
 #[derive(Debug, Default)]
 pub struct CutThroughResult {
@@ -77,7 +79,38 @@ impl CutThroughPruner {
     }
 
     pub fn validate_kernel_sum(&self) -> bool {
-        self.kernels.iter().all(|k| k.excess_commitment.is_some())
+        use curve25519_dalek::ristretto::CompressedRistretto;
+        use curve25519_dalek::ristretto::RistrettoPoint;
+    
+        if self.kernels.is_empty() {
+            return true;
+        }
+    
+        let mut sum = RistrettoPoint::default();
+    
+        for kernel in &self.kernels {
+            let hex = match &kernel.excess_commitment {
+                Some(h) => h,
+                None => return false,
+            };
+    
+            let bytes = match hex::decode(hex) {
+                Ok(b) if b.len() == 32 => b,
+                _ => return false,
+            };
+    
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+    
+            let point = match CompressedRistretto(arr).decompress() {
+                Some(p) => p,
+                None => return false,
+            };
+    
+            sum += point;
+        }
+    
+        sum != RistrettoPoint::default()
     }
 
     pub fn kernel_count(&self) -> usize {
@@ -178,10 +211,15 @@ mod tests {
 
     #[test]
     fn test_kernel_sum_valid_when_all_have_excess() {
+        use crypto::commitments::{Commitment, BlindingFactor};
+    
+        let blinding = BlindingFactor::random();
+        let commitment = Commitment::commit(100, &blinding);
+    
         let mut pruner = CutThroughPruner::new();
         pruner.kernels.push(TxKernel {
             tx_id: "tx1".to_string(),
-            excess_commitment: Some("aabb".to_string()),
+            excess_commitment: Some(commitment.point_hex.clone()),
             excess_signature: Some("ccdd".to_string()),
         });
         assert!(pruner.validate_kernel_sum());

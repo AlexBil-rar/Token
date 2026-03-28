@@ -455,17 +455,11 @@ impl Node {
             tx.excess_commitment = Some(proof.excess_commitment_hex.clone());
             tx.excess_signature = Some(proof.excess_signature_hex.clone());
     
-            if let Some(ref prove_fn) = range_proof_fn {
-                if let Some(rp_json) = prove_fn(amount, &blinding, &commitment) {
-                    tx.range_proof = Some(rp_json);
-                    tx.range_proof_status = crypto::range_proof::RangeProofStatus::Verified;
-                }
-            } else {
-                use crypto::range_proof::{PlaceholderRangeProof, RangeProofSystem};
-                let rp = PlaceholderRangeProof::prove(amount, &blinding, &commitment).unwrap();
-                tx.range_proof = Some(serde_json::to_string(&rp).unwrap());
-                tx.range_proof_status = crypto::range_proof::RangeProofStatus::Experimental;
-            }
+            use crypto::range_proof::{PlaceholderRangeProof, RangeProofSystem};
+            let rp = PlaceholderRangeProof::prove(amount, &blinding, &commitment).unwrap();
+            tx.range_proof = Some(serde_json::to_string(&rp).unwrap());
+            tx.range_proof_status = crypto::range_proof::RangeProofStatus::Experimental;
+
         }
 
         self.mine_anti_spam(&mut tx);
@@ -529,6 +523,14 @@ impl Node {
         self.mempool.remove(&tx_id);
         self.anti_spam.record_transaction();
         self.try_apply_deferred();
+
+        if let Some(tx) = self.dag.get_transaction(&tx_id) {
+            if tx.excess_commitment.is_some() {
+                let kernel = crate::cut_through::TxKernel::from_tx(tx);
+                self.state.add_kernel(kernel);
+            }
+        }
+
         let tx_weight = self.dag.get_transaction(&tx_id)
             .map(|t| t.weight)
             .unwrap_or(1);
@@ -569,19 +571,24 @@ impl Node {
             }
             let stake_weights = self.stake_weights();
             let total_stake = self.total_stake();
-            let _losers = self.conflict_resolver.resolve_ready(
+            let losers = self.conflict_resolver.resolve_ready(
                 &mut self.dag, &stake_weights, total_stake,
             );
 
             use token::staking::ViolationType;
-            for (loser_id, loser_sender) in &_losers {
-                if self.staking.is_eligible(&loser_sender) {
+            for (loser_id, loser_sender) in &losers {
+                if self.staking.is_eligible(loser_sender) {
                     if let Some(result) = self.staking.slash(
-                        &loser_sender,
+                        loser_sender,
                         ViolationType::ConflictingTx,
-                        &loser_id,
+                        loser_id,
                     ) {
-                        let _ = result;
+                        eprintln!(
+                            "Auto-slash: {} slashed {} GHOST for double-spend tx {}",
+                            loser_sender,
+                            result.slashed_amount,
+                            &loser_id[..8.min(loser_id.len())],
+                        );
                     }
                 }
             }
@@ -922,5 +929,53 @@ mod tests {
 
         assert_eq!(node.parent_policy.epsilon, default_epsilon);
         assert_eq!(node.parent_policy.beta, default_beta);
+    }
+
+    #[test]
+    fn test_double_spend_triggers_slash() {
+        let mut node = Node::new_for_test();
+        node.state.credit("alice", 10_000);
+        node.register_stake("alice", 1_000).unwrap();
+    
+        let mut tx1 = TransactionVertex::new(
+            "alice".to_string(), "bob".to_string(),
+            100, 1, 1000, "pk".to_string(), vec![],
+        );
+        tx1.mine_anti_spam(node.current_difficulty());
+        tx1.finalize();
+        let tx1_id = tx1.tx_id.clone();
+    
+        let mut tx2 = TransactionVertex::new(
+            "alice".to_string(), "carol".to_string(),
+            100, 1, 1001, "pk".to_string(), vec![],
+        );
+        tx2.mine_anti_spam(node.current_difficulty());
+        tx2.finalize();
+        let tx2_id = tx2.tx_id.clone();
+    
+        node.dag.add_transaction(tx1).unwrap();
+        node.dag.add_transaction(tx2).unwrap();
+    
+        node.conflict_resolver.register("alice", 1, &tx1_id);
+        node.conflict_resolver.register("alice", 1, &tx2_id);
+    
+        node.dag.get_transaction_mut(&tx1_id).unwrap().weight = 10;
+        node.dag.get_transaction_mut(&tx2_id).unwrap().weight = 3;
+    
+        let stake_weights = node.stake_weights();
+        let total_stake = node.total_stake();
+        let losers = node.conflict_resolver.resolve_ready(
+            &mut node.dag, &stake_weights, total_stake,
+        );
+    
+        use token::staking::ViolationType;
+        for (loser_id, loser_sender) in &losers {
+            if node.staking.is_eligible(loser_sender) {
+                node.staking.slash(loser_sender, ViolationType::ConflictingTx, loser_id);
+            }
+        }
+    
+        let stake = node.staking.get_stake_amount("alice");
+        assert!(stake < 1_000.0, "alice should be slashed, stake={}", stake);
     }
 }
